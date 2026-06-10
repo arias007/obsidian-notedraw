@@ -1,0 +1,9 @@
+doodles/
+debug-log.jsonl
+.obsidian/
+*.zip
+work/
+backups/
+node_modules/
+.DS_Store
+Thumbs.db
