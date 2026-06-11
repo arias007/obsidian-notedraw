@@ -4,6 +4,8 @@ const {
   MarkdownView,
   Notice,
   Plugin,
+  PluginSettingTab,
+  normalizePath,
   setIcon,
 } = require("obsidian");
 
@@ -16,8 +18,21 @@ const LONG_PRESS_MS = 550;
 const SELECT_TAP_DISTANCE = 6;
 const SELECT_STROKE_PADDING = 8;
 const SELECTED_STROKE_ALPHA = 0.38;
-const DOODLE_INTERPOLATION_STEP_PX = 2;
-const DOODLE_MIN_POINT_DISTANCE_PX = 0.35;
+const SELECT_RESIZE_HANDLE_SIZE = 10;
+const SELECT_RESIZE_HANDLE_HIT_RADIUS = 15;
+const DOODLE_INTERPOLATION_STEP_PX = 3;
+const DOODLE_MIN_POINT_DISTANCE_PX = 0.55;
+const DOODLE_COMPACT_DISTANCE_PX = 1.1;
+const MAX_PEN_COUNT = 5;
+const DEFAULT_PEN_OPACITY = 1;
+const TOOL_DRAW = "draw";
+const TOOL_SELECT = "select";
+const BRUSH_PEN = "pen";
+const BRUSH_WATERCOLOR = "watercolor";
+const SETTINGS_EXTRA_CODE_ASSETS = [
+  { path: "extras/code-1.jpg", label: "给我买咖啡 / Buy me a coffee" },
+  { path: "extras/code-2.png", label: "支持继续维护 / Support this tool" },
+];
 const EDITABLE_SELECTOR = [
   ".markdown-preview-view h1",
   ".markdown-preview-view h2",
@@ -36,6 +51,7 @@ const EDITABLE_SELECTOR = [
 const BLOCKED_EDIT_SELECTOR = [
   ".note-doodle-button",
   ".note-doodle-toolbar",
+  ".note-doodle-palette-panel",
   ".note-doodle-canvas",
   "a",
   "button",
@@ -57,6 +73,7 @@ const BLOCKED_EDIT_SELECTOR = [
 module.exports = class NoteDoodlePreviewPlugin extends Plugin {
   async onload() {
     this.controllers = new WeakMap();
+    this.sourceControllers = new Map();
     this.headerActions = new Map();
     this.saveTimers = new Map();
     this.textSaveStates = new WeakMap();
@@ -67,6 +84,13 @@ module.exports = class NoteDoodlePreviewPlugin extends Plugin {
       name: "Toggle preview edit and doodle mode",
       callback: () => this.toggleActiveController(),
     });
+    this.addSettingTab(new NoteDoodlePreviewSettingTab(this.app, this));
+
+    const syncSource = () => this.syncSourceControllers();
+    this.registerEvent(this.app.workspace.on("layout-change", syncSource));
+    this.registerEvent(this.app.workspace.on("active-leaf-change", syncSource));
+    this.registerEvent(this.app.workspace.on("file-open", syncSource));
+    window.setTimeout(syncSource, 0);
 
     this.registerMarkdownPostProcessor((el, ctx) => {
       const preview = el.closest(".markdown-preview-view");
@@ -103,6 +127,11 @@ module.exports = class NoteDoodlePreviewPlugin extends Plugin {
   }
 
   onunload() {
+    for (const controller of this.sourceControllers.values()) {
+      controller.destroy();
+    }
+    this.sourceControllers.clear();
+
     for (const state of this.headerActions.values()) {
       state.button?.remove();
     }
@@ -117,15 +146,79 @@ module.exports = class NoteDoodlePreviewPlugin extends Plugin {
 
   toggleActiveController() {
     const view = this.app.workspace.getActiveViewOfType(MarkdownView);
-    const preview = view ? findRootPreviewForView(view) : null;
-    const controller = preview ? this.controllers.get(preview) || preview._noteDoodleController : null;
+    const surface = view
+      ? (isSourceMode(view) ? findSourceSurfaceForView(view) || findRootPreviewForView(view) : findRootPreviewForView(view) || findSourceSurfaceForView(view))
+      : null;
+    const controller = surface ? this.controllers.get(surface) || surface._noteDoodleController : null;
 
     if (!controller) {
-      new Notice("Open a note in reading preview first.");
+      new Notice("Open a note first.");
       return;
     }
 
     controller.toggle();
+  }
+
+  syncSourceControllers() {
+    const leaves = this.app.workspace.getLeavesOfType?.("markdown") || [];
+    const activeViews = new Set();
+
+    for (const leaf of leaves) {
+      const view = leaf.view;
+      if (!(view instanceof MarkdownView) || !view.file) {
+        continue;
+      }
+
+      const sourceEl = findSourceSurfaceForView(view);
+      const shouldMount = Boolean(sourceEl) && isSourceMode(view);
+      const existing = this.sourceControllers.get(view);
+
+      if (!shouldMount) {
+        if (existing) {
+          existing.destroy();
+          this.sourceControllers.delete(view);
+        }
+        continue;
+      }
+
+      activeViews.add(view);
+
+      if (existing?.previewEl === sourceEl) {
+        existing.setFile(view.file).catch((error) => {
+          console.error(`[${PLUGIN_ID}] Failed to switch source controller file`, error);
+        });
+        continue;
+      }
+
+      if (existing) {
+        existing.destroy();
+      }
+
+      const mountedOnElement = this.controllers.get(sourceEl) || sourceEl._noteDoodleController;
+      if (mountedOnElement?.destroy) {
+        mountedOnElement.destroy();
+      }
+
+      cleanupDoodleUi(sourceEl);
+
+      const controller = new PreviewDoodleController(this, sourceEl, view, view.file, {
+        allowTextEdit: false,
+        surfaceType: "source",
+      });
+      this.controllers.set(sourceEl, controller);
+      this.sourceControllers.set(view, controller);
+      controller.mount().catch((error) => {
+        console.error(`[${PLUGIN_ID}] Failed to mount source doodle controller`, error);
+      });
+      this.register(() => controller.destroy());
+    }
+
+    for (const [view, controller] of Array.from(this.sourceControllers.entries())) {
+      if (!activeViews.has(view) && !controller.previewEl?.isConnected) {
+        controller.destroy();
+        this.sourceControllers.delete(view);
+      }
+    }
   }
 
   installHeaderButton(controller) {
@@ -136,11 +229,12 @@ module.exports = class NoteDoodlePreviewPlugin extends Plugin {
       state = {
         button: null,
         controller: null,
+        controllers: new Set(),
       };
 
-      state.clickHandler = (event) => state.controller?.onButtonClick(event);
-      state.pointerDownHandler = (event) => state.controller?.onButtonPointerDown(event);
-      state.pointerUpHandler = (event) => state.controller?.onButtonPointerUp(event);
+      state.clickHandler = (event) => this.resolveHeaderController(view, state)?.onButtonClick(event);
+      state.pointerDownHandler = (event) => this.resolveHeaderController(view, state)?.onButtonPointerDown(event);
+      state.pointerUpHandler = (event) => this.resolveHeaderController(view, state)?.onButtonPointerUp(event);
 
       let button = null;
       if (typeof view?.addAction === "function") {
@@ -171,7 +265,9 @@ module.exports = class NoteDoodlePreviewPlugin extends Plugin {
       this.headerActions.set(view, state);
     }
 
-    state.controller = controller;
+    state.controllers ??= new Set();
+    state.controllers.add(controller);
+    state.controller = this.pickHeaderController(view, state, controller);
     state.button._noteDoodleController = controller;
     state.button.classList.add("note-doodle-header-button");
     state.button.setAttribute("aria-label", "Edit text / draw");
@@ -184,13 +280,52 @@ module.exports = class NoteDoodlePreviewPlugin extends Plugin {
 
   releaseHeaderButton(controller) {
     const state = this.headerActions.get(controller.view);
-    if (!state || state.controller !== controller) {
+    if (!state) {
       return;
     }
 
-    state.button?.remove();
-    this.headerActions.delete(controller.view);
-    this.cleanupHeaderButtons(controller.view);
+    state.controllers?.delete(controller);
+    if (state.controller === controller) {
+      state.controller = this.pickHeaderController(controller.view, state);
+    }
+
+    if (state.controller) {
+      state.button._noteDoodleController = state.controller;
+      state.button.classList.toggle("is-active", state.controller.active);
+      return;
+    }
+
+    state.button?._noteDoodleController && delete state.button._noteDoodleController;
+    state.button?.classList.remove("is-active");
+    if (!controller.view?.containerEl?.isConnected) {
+      state.button?.remove();
+      this.headerActions.delete(controller.view);
+      this.cleanupHeaderButtons(controller.view);
+    }
+  }
+
+  resolveHeaderController(view, state) {
+    const controller = this.pickHeaderController(view, state);
+    if (controller) {
+      state.controller = controller;
+      state.button._noteDoodleController = controller;
+      state.button.classList.toggle("is-active", controller.active);
+    }
+
+    return controller;
+  }
+
+  pickHeaderController(view, state, preferred = null) {
+    const controllers = Array.from(state.controllers || [])
+      .filter((controller) => controller?.previewEl?.isConnected && controller.view === view);
+    const currentMode = isSourceMode(view) ? "source" : "preview";
+    const preferredLive = preferred && controllers.includes(preferred) ? preferred : null;
+
+    return controllers.find((controller) => controller.surfaceType === currentMode)
+      || preferredLive
+      || controllers.find((controller) => controller.active)
+      || controllers[0]
+      || null;
   }
 
   cleanupHeaderButtons(view, keepButton = null) {
@@ -293,6 +428,7 @@ module.exports = class NoteDoodlePreviewPlugin extends Plugin {
 
     const timer = setTimeout(() => {
       this.saveTimers.delete(path);
+      compactDoodleData(data);
       this.writeDoodles(file, data).catch((error) => {
         console.error(`[${PLUGIN_ID}] Failed to save doodle file`, error);
         new Notice("Failed to save doodle data.");
@@ -313,6 +449,20 @@ module.exports = class NoteDoodlePreviewPlugin extends Plugin {
     }, null, 2);
 
     await this.app.vault.adapter.write(path, body);
+  }
+
+  getPluginAssetPath(relativePath) {
+    const pluginDir = this.manifest.dir ?? `${this.app.vault.configDir}/plugins/${this.manifest.id}`;
+    return normalizePath(`${pluginDir}/${relativePath}`);
+  }
+
+  async getOptionalAssetResourcePath(relativePath) {
+    const assetPath = this.getPluginAssetPath(relativePath);
+    if (!(await this.app.vault.adapter.exists(assetPath))) {
+      return null;
+    }
+
+    return this.app.vault.adapter.getResourcePath(assetPath);
   }
 
   prepareTextEditState(file, originalText, element) {
@@ -578,11 +728,13 @@ module.exports = class NoteDoodlePreviewPlugin extends Plugin {
 };
 
 class PreviewDoodleController {
-  constructor(plugin, previewEl, view, file) {
+  constructor(plugin, previewEl, view, file, options = {}) {
     this.plugin = plugin;
     this.previewEl = previewEl;
     this.view = view;
     this.file = file;
+    this.allowTextEdit = options.allowTextEdit !== false;
+    this.surfaceType = options.surfaceType || "preview";
     this.active = false;
     this.doodleData = {
       version: 1,
@@ -592,8 +744,26 @@ class PreviewDoodleController {
     };
     this.currentStroke = null;
     this.currentEditor = null;
-    this.penColor = "#e53935";
-    this.penWidth = 3;
+    this.brushMode = BRUSH_PEN;
+    this.brushSettings = {
+      [BRUSH_PEN]: {
+        color: "#e53935",
+        width: 3,
+        opacity: DEFAULT_PEN_OPACITY,
+        count: 1,
+      },
+      [BRUSH_WATERCOLOR]: {
+        color: "#3b82f6",
+        width: 9,
+        opacity: 0.34,
+        count: 3,
+      },
+    };
+    this.penColor = this.brushSettings[BRUSH_PEN].color;
+    this.penWidth = this.brushSettings[BRUSH_PEN].width;
+    this.penOpacity = this.brushSettings[BRUSH_PEN].opacity;
+    this.penCount = this.brushSettings[BRUSH_PEN].count;
+    this.toolMode = TOOL_DRAW;
     this.pointerDown = false;
     this.startedOnText = false;
     this.pointerStartPoint = null;
@@ -608,12 +778,31 @@ class PreviewDoodleController {
     this.dragStrokeStartPoint = null;
     this.dragStrokeOriginalPoints = null;
     this.dragStrokeMoved = false;
+    this.dragStrokeHitIndex = -1;
+    this.resizingSelection = false;
+    this.resizeSelectionHandle = null;
+    this.resizeSelectionStartPoint = null;
+    this.resizeSelectionOriginalBounds = null;
+    this.resizeSelectionOriginalStrokes = null;
+    this.resizeSelectionMoved = false;
+    this.selectingStrokes = false;
+    this.selectionStartPoint = null;
+    this.selectionCurrentPoint = null;
     this.didMove = false;
     this.redoStack = [];
     this.selectedStrokeIndex = -1;
+    this.selectedStrokeIndexes = new Set();
     this.doodlesVisible = true;
     this.buttonLongPressed = false;
     this.buttonLongPressTimer = null;
+    this.paletteOpen = false;
+    this.canvasCssWidth = 1;
+    this.canvasCssHeight = 1;
+    this.renderFrameId = null;
+    this.resizeFrameId = null;
+    this.staticCanvas = document.createElement("canvas");
+    this.staticCtx = null;
+    this.staticCacheDirty = true;
 
     this.onPointerDown = this.onPointerDown.bind(this);
     this.onPointerMove = this.onPointerMove.bind(this);
@@ -623,16 +812,36 @@ class PreviewDoodleController {
     this.onButtonClick = this.onButtonClick.bind(this);
     this.onButtonPointerDown = this.onButtonPointerDown.bind(this);
     this.onButtonPointerUp = this.onButtonPointerUp.bind(this);
+    this.onDocumentPointerDown = this.onDocumentPointerDown.bind(this);
   }
 
   async mount() {
     cleanupDoodleUi(this.previewEl);
     this.previewEl._noteDoodleController = this;
     this.previewEl.addClass("note-doodle-shell");
+    this.previewEl.toggleClass("is-note-doodle-source-shell", this.surfaceType === "source");
 
     this.button = this.createHeaderButton();
 
     this.toolbar = this.previewEl.createDiv({ cls: "note-doodle-toolbar" });
+    this.penButton = this.toolbar.createEl("button", {
+      attr: { type: "button", title: "Pen" },
+    });
+    setIcon(this.penButton, "pen-line");
+    this.penButton.addEventListener("click", () => this.setBrushMode(BRUSH_PEN));
+
+    this.watercolorButton = this.toolbar.createEl("button", {
+      attr: { type: "button", title: "Watercolor brush" },
+    });
+    setIcon(this.watercolorButton, "paintbrush");
+    this.watercolorButton.addEventListener("click", () => this.setBrushMode(BRUSH_WATERCOLOR));
+
+    this.selectButton = this.toolbar.createEl("button", {
+      attr: { type: "button", title: "Select doodles" },
+    });
+    setIcon(this.selectButton, "mouse-pointer-2");
+    this.selectButton.addEventListener("click", () => this.toggleSelectMode());
+
     this.undoButton = this.toolbar.createEl("button", {
       attr: { type: "button", title: "Undo last doodle" },
     });
@@ -651,26 +860,64 @@ class PreviewDoodleController {
     setIcon(this.deleteButton, "trash-2");
     this.deleteButton.addEventListener("click", () => this.deleteSelectedStroke());
 
-    this.colorInput = this.toolbar.createEl("input", {
-      attr: { type: "color", value: this.penColor, title: "Pen color" },
+    this.paletteButton = this.toolbar.createEl("button", {
+      attr: { type: "button", title: "Pen settings" },
     });
-    this.colorInput.addEventListener("change", () => {
-      this.penColor = this.colorInput.value;
+    setIcon(this.paletteButton, "palette");
+    this.paletteButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      this.togglePalettePanel();
     });
 
-    this.widthInput = this.toolbar.createEl("input", {
-      cls: "note-doodle-width",
-      attr: {
-        type: "range",
-        value: String(this.penWidth),
-        min: "1",
-        max: "16",
-        step: "1",
-        title: "Pen width",
-      },
+    this.palettePanel = this.previewEl.createDiv({ cls: "note-doodle-palette-panel" });
+    this.colorInput = this.createPaletteInput("palette", "color", {
+      type: "color",
+      value: this.penColor,
+      title: "Pen color",
+    });
+    this.colorInput.addEventListener("input", () => {
+      this.currentBrushSettings().color = this.colorInput.value;
+      this.syncCurrentBrushFields();
+    });
+
+    this.widthInput = this.createPaletteInput("circle", "width", {
+      type: "range",
+      value: String(this.penWidth),
+      min: "1",
+      max: "16",
+      step: "1",
+      title: "Pen width",
     });
     this.widthInput.addEventListener("input", () => {
-      this.penWidth = Number(this.widthInput.value);
+      this.currentBrushSettings().width = Number(this.widthInput.value);
+      this.syncCurrentBrushFields();
+    });
+
+    this.opacityInput = this.createPaletteInput("droplets", "opacity", {
+      type: "range",
+      value: String(this.penOpacity),
+      min: "0.1",
+      max: "1",
+      step: "0.05",
+      title: "Pen opacity",
+    });
+    this.opacityInput.addEventListener("input", () => {
+      this.currentBrushSettings().opacity = clamp(Number(this.opacityInput.value), 0.1, 1);
+      this.syncCurrentBrushFields();
+    });
+
+    this.countInput = this.createPaletteInput("layers-3", "count", {
+      type: "range",
+      value: String(this.penCount),
+      min: "1",
+      max: String(MAX_PEN_COUNT),
+      step: "1",
+      title: "Pen count",
+    });
+    this.countInput.addEventListener("input", () => {
+      this.currentBrushSettings().count = clamp(Math.round(Number(this.countInput.value)), 1, MAX_PEN_COUNT);
+      this.syncCurrentBrushFields();
     });
 
     this.canvas = this.previewEl.createEl("canvas", { cls: "note-doodle-canvas" });
@@ -681,14 +928,28 @@ class PreviewDoodleController {
     this.canvas.addEventListener("lostpointercapture", this.onPointerUp);
     this.canvas.addEventListener("wheel", this.onWheel, { passive: false });
     window.addEventListener("resize", this.onResize);
+    document.addEventListener("pointerdown", this.onDocumentPointerDown, true);
     if (typeof ResizeObserver !== "undefined") {
       this.resizeObserver = new ResizeObserver(this.onResize);
       this.resizeObserver.observe(this.previewEl);
     }
 
     this.doodleData = await this.plugin.readDoodles(this.file);
+    this.updateToolButtons();
+    this.syncPaletteInputs();
     this.resizeCanvas();
     this.render();
+    this.scheduleLayoutRefresh();
+  }
+
+  createPaletteInput(icon, cls, attr) {
+    const row = this.palettePanel.createDiv({ cls: "note-doodle-palette-row" });
+    const iconEl = row.createSpan({ cls: "note-doodle-palette-icon" });
+    setIcon(iconEl, icon);
+    return row.createEl("input", {
+      cls: `note-doodle-${cls}`,
+      attr,
+    });
   }
 
   createHeaderButton() {
@@ -714,8 +975,20 @@ class PreviewDoodleController {
     this.dragStrokeStartPoint = null;
     this.dragStrokeOriginalPoints = null;
     this.dragStrokeMoved = false;
+    this.dragStrokeHitIndex = -1;
+    this.resizingSelection = false;
+    this.resizeSelectionHandle = null;
+    this.resizeSelectionStartPoint = null;
+    this.resizeSelectionOriginalBounds = null;
+    this.resizeSelectionOriginalStrokes = null;
+    this.resizeSelectionMoved = false;
+    this.selectingStrokes = false;
+    this.selectionStartPoint = null;
+    this.selectionCurrentPoint = null;
     this.redoStack = [];
     this.selectedStrokeIndex = -1;
+    this.selectedStrokeIndexes.clear();
+    this.invalidateStaticCache();
     this.doodleData = await this.plugin.readDoodles(file);
     this.resizeCanvas();
     this.render();
@@ -724,14 +997,23 @@ class PreviewDoodleController {
   destroy() {
     this.endTextEdit();
     this.clearButtonLongPress();
+    this.cancelRenderFrame();
+    this.cancelResizeFrame();
     this.resizeObserver?.disconnect();
     window.removeEventListener("resize", this.onResize);
+    document.removeEventListener("pointerdown", this.onDocumentPointerDown, true);
     this.plugin.releaseHeaderButton(this);
     this.toolbar?.remove();
+    this.palettePanel?.remove();
     this.canvas?.remove();
     this.previewEl.removeClass("note-doodle-shell");
     this.previewEl.removeClass("is-doodle-active");
     this.previewEl.removeClass("is-doodle-hidden");
+    this.previewEl.removeClass("is-select-mode");
+    this.previewEl.removeClass("is-palette-open");
+    this.previewEl.removeClass("is-watercolor-mode");
+    this.previewEl.removeClass("is-note-doodle-source-shell");
+    this.previewEl.removeClass("is-resizing-selection");
     if (this.previewEl._noteDoodleController === this) {
       delete this.previewEl._noteDoodleController;
     }
@@ -744,12 +1026,159 @@ class PreviewDoodleController {
 
     if (!this.active) {
       this.endTextEdit();
+      this.setPaletteOpen(false);
+      this.cancelCurrentStroke();
+      this.cancelSelectionDrag(true);
+      this.cancelSelectedStrokeDrag(true);
+    } else {
+      this.scheduleLayoutRefresh();
     }
   }
 
   onResize() {
-    this.resizeCanvas();
+    this.scheduleResize();
+  }
+
+  scheduleResize() {
+    if (this.resizeFrameId !== null) {
+      return;
+    }
+
+    this.resizeFrameId = window.requestAnimationFrame(() => {
+      this.resizeFrameId = null;
+      this.resizeCanvas();
+      this.updateFloatingControlsPosition();
+      this.render();
+    });
+  }
+
+  cancelResizeFrame() {
+    if (this.resizeFrameId !== null) {
+      window.cancelAnimationFrame(this.resizeFrameId);
+      this.resizeFrameId = null;
+    }
+  }
+
+  scheduleLayoutRefresh() {
+    this.scheduleResize();
+    window.requestAnimationFrame?.(() => this.scheduleResize());
+    window.requestAnimationFrame?.(() => window.requestAnimationFrame?.(() => this.scheduleResize()));
+    window.setTimeout(() => this.scheduleResize(), 80);
+    window.setTimeout(() => this.scheduleResize(), 350);
+  }
+
+  updateFloatingControlsPosition() {
+    if (!this.button || !this.toolbar) {
+      return;
+    }
+
+    const hostRect = (this.view?.containerEl || this.previewEl).getBoundingClientRect();
+    const buttonRect = this.button.getBoundingClientRect();
+    const buttonVisible = buttonRect.width > 0
+      && buttonRect.height > 0
+      && buttonRect.bottom > 0
+      && buttonRect.top < window.innerHeight;
+    const anchorRight = hostRect.right > 0 ? hostRect.right : (buttonVisible ? buttonRect.right : window.innerWidth);
+    const anchorBottom = buttonVisible ? buttonRect.bottom : hostRect.top + 40;
+    const right = clamp(window.innerWidth - anchorRight + 10, 8, Math.max(8, window.innerWidth - 48));
+    const top = clamp(anchorBottom + 10, Math.max(42, hostRect.top + 42), Math.max(42, window.innerHeight - 48));
+
+    this.previewEl.style.setProperty("--note-doodle-toolbar-right", `${Math.round(right)}px`);
+    this.previewEl.style.setProperty("--note-doodle-toolbar-top", `${Math.round(top)}px`);
+    this.previewEl.style.setProperty("--note-doodle-palette-top", `${Math.round(top + 42)}px`);
+  }
+
+  setBrushMode(mode) {
+    if (![BRUSH_PEN, BRUSH_WATERCOLOR].includes(mode)) {
+      return;
+    }
+
+    this.brushMode = mode;
+    this.toolMode = TOOL_DRAW;
+    this.previewEl.removeClass("is-select-mode");
+    this.endTextEdit();
+    this.cancelCurrentStroke();
+    this.cancelSelectionDrag(true);
+    this.syncCurrentBrushFields();
+    this.syncPaletteInputs();
+    this.updateToolButtons();
     this.render();
+  }
+
+  currentBrushSettings() {
+    if (!this.brushSettings[this.brushMode]) {
+      this.brushMode = BRUSH_PEN;
+    }
+
+    return this.brushSettings[this.brushMode];
+  }
+
+  syncCurrentBrushFields() {
+    const settings = this.currentBrushSettings();
+    this.penColor = settings.color;
+    this.penWidth = settings.width;
+    this.penOpacity = settings.opacity;
+    this.penCount = settings.count;
+  }
+
+  syncPaletteInputs() {
+    const settings = this.currentBrushSettings();
+
+    if (this.colorInput) {
+      this.colorInput.value = settings.color;
+    }
+    if (this.widthInput) {
+      this.widthInput.value = String(settings.width);
+    }
+    if (this.opacityInput) {
+      this.opacityInput.value = String(settings.opacity);
+    }
+    if (this.countInput) {
+      this.countInput.value = String(settings.count);
+    }
+  }
+
+  updateToolButtons() {
+    this.penButton?.classList.toggle("is-active", this.toolMode === TOOL_DRAW && this.brushMode === BRUSH_PEN);
+    this.watercolorButton?.classList.toggle("is-active", this.toolMode === TOOL_DRAW && this.brushMode === BRUSH_WATERCOLOR);
+    this.selectButton?.classList.toggle("is-active", this.toolMode === TOOL_SELECT);
+    this.previewEl.toggleClass("is-watercolor-mode", this.toolMode === TOOL_DRAW && this.brushMode === BRUSH_WATERCOLOR);
+  }
+
+  toggleSelectMode() {
+    this.toolMode = this.toolMode === TOOL_SELECT ? TOOL_DRAW : TOOL_SELECT;
+    this.previewEl.toggleClass("is-select-mode", this.toolMode === TOOL_SELECT);
+    this.updateToolButtons();
+    this.endTextEdit();
+    this.cancelCurrentStroke();
+    this.cancelSelectionDrag(true);
+    this.render();
+  }
+
+  togglePalettePanel() {
+    this.setPaletteOpen(!this.paletteOpen);
+  }
+
+  setPaletteOpen(open) {
+    this.paletteOpen = Boolean(open);
+    this.previewEl.toggleClass("is-palette-open", this.paletteOpen);
+    this.paletteButton?.classList.toggle("is-active", this.paletteOpen);
+    if (this.paletteOpen) {
+      this.updateFloatingControlsPosition();
+    }
+  }
+
+  onDocumentPointerDown(event) {
+    if (!this.paletteOpen) {
+      return;
+    }
+
+    const target = event.target;
+    if (this.palettePanel?.contains(target) || this.paletteButton?.contains(target)) {
+      return;
+    }
+
+    this.setPaletteOpen(false);
   }
 
   onButtonPointerDown() {
@@ -796,6 +1225,8 @@ class PreviewDoodleController {
     const ratio = window.devicePixelRatio || 1;
     const width = Math.max(1, Math.round(this.previewEl.scrollWidth));
     const height = Math.max(1, Math.round(this.previewEl.scrollHeight));
+    this.canvasCssWidth = width;
+    this.canvasCssHeight = height;
 
     this.canvas.style.width = `${width}px`;
     this.canvas.style.height = `${height}px`;
@@ -803,6 +1234,13 @@ class PreviewDoodleController {
     this.canvas.height = Math.round(height * ratio);
     this.ctx = this.canvas.getContext("2d");
     this.ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+    if (this.staticCanvas.width !== this.canvas.width || this.staticCanvas.height !== this.canvas.height) {
+      this.staticCanvas.width = this.canvas.width;
+      this.staticCanvas.height = this.canvas.height;
+      this.staticCtx = this.staticCanvas.getContext("2d");
+      this.invalidateStaticCache();
+    }
+    this.staticCtx?.setTransform(ratio, 0, 0, ratio, 0, 0);
 
     if (rect.width > 0) {
       this.canvas.style.minWidth = `${Math.round(rect.width)}px`;
@@ -824,11 +1262,23 @@ class PreviewDoodleController {
     }
 
     const target = this.elementBelowCanvas(event.clientX, event.clientY);
-    const editable = findEditableTarget(target, this.previewEl);
+    const editable = this.allowTextEdit ? findEditableTarget(target, this.previewEl) : null;
     const point = this.eventToPoint(event);
+    const hitStrokeIndex = this.findStrokeAt(point);
+    const resizeHandle = this.findSelectionHandleAt(point);
+
+    if (resizeHandle) {
+      this.startSelectedStrokeResize(event, point, resizeHandle);
+      return;
+    }
 
     if (this.selectedStrokeFrameContains(point)) {
-      this.startSelectedStrokeDrag(event, point);
+      this.startSelectedStrokeDrag(event, point, hitStrokeIndex);
+      return;
+    }
+
+    if (this.toolMode === TOOL_SELECT) {
+      this.startSelectionDrag(event, point);
       return;
     }
 
@@ -850,9 +1300,13 @@ class PreviewDoodleController {
       // Pointer capture is best-effort; drawing still works without it.
     }
 
+    const brush = this.currentBrushSettings();
     this.currentStroke = {
-      color: this.penColor,
-      width: this.penWidth,
+      brush: this.brushMode,
+      color: brush.color,
+      width: brush.width,
+      opacity: brush.opacity,
+      count: brush.count,
       points: [this.pointerStartPoint],
     };
     event.preventDefault();
@@ -882,6 +1336,16 @@ class PreviewDoodleController {
       return;
     }
 
+    if (this.resizingSelection && event.pointerId === this.activePointerId) {
+      this.moveSelectedStrokeResize(event);
+      return;
+    }
+
+    if (this.selectingStrokes && event.pointerId === this.activePointerId) {
+      this.updateSelectionDrag(event);
+      return;
+    }
+
     if (!this.active || !this.pointerDown || !this.currentStroke || event.pointerId !== this.activePointerId) {
       return;
     }
@@ -891,11 +1355,11 @@ class PreviewDoodleController {
 
     if (this.didMove && !wasDrawing) {
       this.endTextEdit();
-      this.selectedStrokeIndex = -1;
+      this.clearSelectedStrokes();
     }
 
     if (this.didMove) {
-      this.render();
+      this.requestRender();
     }
 
     event.preventDefault();
@@ -934,6 +1398,16 @@ class PreviewDoodleController {
       return;
     }
 
+    if (this.resizingSelection && event.pointerId === this.activePointerId) {
+      this.finishSelectedStrokeResize(event);
+      return;
+    }
+
+    if (this.selectingStrokes && event.pointerId === this.activePointerId) {
+      this.finishSelectionDrag(event);
+      return;
+    }
+
     if (!this.active || !this.pointerDown || !this.currentStroke || event.pointerId !== this.activePointerId) {
       return;
     }
@@ -950,14 +1424,15 @@ class PreviewDoodleController {
       const point = this.pointerStartPoint || this.eventToPoint(event);
       this.currentStroke = null;
       if (editable) {
-        this.startTextEdit(editable);
+        this.startTextEdit(editable, this.pointerStartClient || { x: event.clientX, y: event.clientY });
       } else {
-        this.selectedStrokeIndex = this.findStrokeAt(point);
+        this.setSelectedStrokes(this.findStrokeAt(point));
       }
     } else {
       this.doodleData.strokes.push(this.currentStroke);
-      this.selectedStrokeIndex = -1;
+      this.clearSelectedStrokes();
       this.redoStack = [];
+      this.invalidateStaticCache();
       this.plugin.scheduleDoodleSave(this.file, this.doodleData);
       this.currentStroke = null;
     }
@@ -1067,9 +1542,75 @@ class PreviewDoodleController {
     this.render();
   }
 
-  startSelectedStrokeDrag(event, point) {
-    const stroke = this.doodleData.strokes[this.selectedStrokeIndex];
-    if (!stroke) {
+  startSelectionDrag(event, point) {
+    this.endTextEdit();
+    this.cancelCurrentStroke();
+    this.selectingStrokes = true;
+    this.selectionStartPoint = point;
+    this.selectionCurrentPoint = point;
+    this.pointerStartClient = { x: event.clientX, y: event.clientY };
+    this.activePointerId = event.pointerId;
+    this.previewEl.addClass("is-selecting-strokes");
+
+    try {
+      this.canvas.setPointerCapture(event.pointerId);
+    } catch (_) {
+      // Pointer capture is best-effort; selection still works without it.
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
+  updateSelectionDrag(event) {
+    this.selectionCurrentPoint = this.eventToPoint(event);
+    this.requestRender();
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
+  finishSelectionDrag(event) {
+    const point = this.eventToPoint(event);
+    const movedDistance = this.pointerStartClient
+      ? pointerDistance(this.pointerStartClient, { x: event.clientX, y: event.clientY })
+      : 0;
+
+    if (movedDistance <= SELECT_TAP_DISTANCE || !this.selectionStartPoint || !this.selectionCurrentPoint) {
+      this.setSelectedStrokes(this.findStrokeAt(point));
+    } else {
+      this.setSelectedStrokes(this.findStrokesInSelection(this.selectionStartPoint, this.selectionCurrentPoint));
+    }
+
+    this.releasePointerCapture(event.pointerId);
+    this.clearSelectionDragState();
+    this.requestRender();
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
+  cancelSelectionDrag(render = false) {
+    if (this.activePointerId !== null) {
+      this.releasePointerCapture(this.activePointerId);
+    }
+
+    this.clearSelectionDragState();
+    if (render) {
+      this.render();
+    }
+  }
+
+  clearSelectionDragState() {
+    this.selectingStrokes = false;
+    this.selectionStartPoint = null;
+    this.selectionCurrentPoint = null;
+    this.pointerStartClient = null;
+    this.activePointerId = null;
+    this.previewEl.removeClass("is-selecting-strokes");
+  }
+
+  startSelectedStrokeDrag(event, point, hitIndex = -1) {
+    const indexes = this.getSelectedStrokeIndexes();
+    if (!indexes.length) {
       return;
     }
 
@@ -1078,8 +1619,12 @@ class PreviewDoodleController {
     this.currentStroke = null;
     this.draggingStroke = true;
     this.dragStrokeStartPoint = point;
-    this.dragStrokeOriginalPoints = stroke.points.map((strokePoint) => ({ ...strokePoint }));
+    this.dragStrokeOriginalPoints = new Map(indexes.map((index) => [
+      index,
+      this.doodleData.strokes[index].points.map((strokePoint) => ({ ...strokePoint })),
+    ]));
     this.dragStrokeMoved = false;
+    this.dragStrokeHitIndex = hitIndex;
     this.pointerStartClient = { x: event.clientX, y: event.clientY };
     this.activePointerId = event.pointerId;
     this.previewEl.addClass("is-moving-selection");
@@ -1095,14 +1640,14 @@ class PreviewDoodleController {
   }
 
   moveSelectedStroke(event) {
-    const stroke = this.doodleData.strokes[this.selectedStrokeIndex];
-    if (!stroke || !this.dragStrokeStartPoint || !this.dragStrokeOriginalPoints) {
+    if (!this.dragStrokeStartPoint || !this.dragStrokeOriginalPoints?.size) {
       return;
     }
 
     const point = this.eventToPoint(event);
-    const xs = this.dragStrokeOriginalPoints.map((strokePoint) => strokePoint.x);
-    const ys = this.dragStrokeOriginalPoints.map((strokePoint) => strokePoint.y);
+    const originalPoints = Array.from(this.dragStrokeOriginalPoints.values()).flat();
+    const xs = originalPoints.map((strokePoint) => strokePoint.x);
+    const ys = originalPoints.map((strokePoint) => strokePoint.y);
     const minX = Math.min(...xs);
     const maxX = Math.max(...xs);
     const minY = Math.min(...ys);
@@ -1112,21 +1657,28 @@ class PreviewDoodleController {
     const movedDistance = pointDistanceOnCanvas(
       this.dragStrokeStartPoint,
       point,
-      this.canvas.clientWidth,
-      this.canvas.clientHeight,
+      this.canvasWidth(),
+      this.canvasHeight(),
     );
 
     if (movedDistance > SELECT_TAP_DISTANCE) {
       this.dragStrokeMoved = true;
     }
 
-    stroke.points = this.dragStrokeOriginalPoints.map((strokePoint) => ({
-      ...strokePoint,
-      x: clamp(strokePoint.x + dx, 0, 1),
-      y: clamp(strokePoint.y + dy, 0, 1),
-    }));
+    for (const [index, points] of this.dragStrokeOriginalPoints.entries()) {
+      const stroke = this.doodleData.strokes[index];
+      if (!stroke) {
+        continue;
+      }
 
-    this.render();
+      stroke.points = points.map((strokePoint) => ({
+        ...strokePoint,
+        x: clamp(strokePoint.x + dx, 0, 1),
+        y: clamp(strokePoint.y + dy, 0, 1),
+      }));
+    }
+
+    this.requestRender();
     event.preventDefault();
     event.stopPropagation();
   }
@@ -1135,6 +1687,8 @@ class PreviewDoodleController {
     if (this.dragStrokeMoved) {
       this.redoStack = [];
       this.plugin.scheduleDoodleSave(this.file, this.doodleData);
+    } else if (this.getSelectedStrokeIndexes().length > 1 && this.dragStrokeHitIndex >= 0) {
+      this.setSelectedStrokes(this.dragStrokeHitIndex);
     } else {
       this.cancelSelectedStrokeDrag(true);
     }
@@ -1147,9 +1701,13 @@ class PreviewDoodleController {
   }
 
   cancelSelectedStrokeDrag(restoreOriginal = false) {
-    const stroke = this.doodleData.strokes[this.selectedStrokeIndex];
-    if (restoreOriginal && stroke && this.dragStrokeOriginalPoints) {
-      stroke.points = this.dragStrokeOriginalPoints.map((strokePoint) => ({ ...strokePoint }));
+    if (restoreOriginal && this.dragStrokeOriginalPoints?.size) {
+      for (const [index, points] of this.dragStrokeOriginalPoints.entries()) {
+        const stroke = this.doodleData.strokes[index];
+        if (stroke) {
+          stroke.points = points.map((strokePoint) => ({ ...strokePoint }));
+        }
+      }
     }
 
     if (this.activePointerId !== null) {
@@ -1165,9 +1723,160 @@ class PreviewDoodleController {
     this.dragStrokeStartPoint = null;
     this.dragStrokeOriginalPoints = null;
     this.dragStrokeMoved = false;
+    this.dragStrokeHitIndex = -1;
     this.pointerStartClient = null;
     this.activePointerId = null;
     this.previewEl.removeClass("is-moving-selection");
+  }
+
+  startSelectedStrokeResize(event, point, handle) {
+    const indexes = this.getSelectedStrokeIndexes();
+    const bounds = this.getSelectedStrokeNormalizedBounds();
+    if (!indexes.length || !bounds) {
+      return;
+    }
+
+    this.endTextEdit();
+    this.pointerDown = false;
+    this.currentStroke = null;
+    this.resizingSelection = true;
+    this.resizeSelectionHandle = handle;
+    this.resizeSelectionStartPoint = point;
+    this.resizeSelectionOriginalBounds = bounds;
+    this.resizeSelectionOriginalStrokes = new Map(indexes.map((index) => [
+      index,
+      {
+        width: this.doodleData.strokes[index].width || this.penWidth,
+        points: this.doodleData.strokes[index].points.map((strokePoint) => ({ ...strokePoint })),
+      },
+    ]));
+    this.resizeSelectionMoved = false;
+    this.pointerStartClient = { x: event.clientX, y: event.clientY };
+    this.activePointerId = event.pointerId;
+    this.previewEl.addClass("is-resizing-selection");
+
+    try {
+      this.canvas.setPointerCapture(event.pointerId);
+    } catch (_) {
+      // Pointer capture is best-effort; resizing still works without it.
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
+  moveSelectedStrokeResize(event) {
+    if (!this.resizeSelectionOriginalBounds || !this.resizeSelectionOriginalStrokes?.size || !this.resizeSelectionStartPoint) {
+      return;
+    }
+
+    const point = this.eventToPoint(event);
+    const movedDistance = pointDistanceOnCanvas(
+      this.resizeSelectionStartPoint,
+      point,
+      this.canvasWidth(),
+      this.canvasHeight(),
+    );
+
+    if (movedDistance > SELECT_TAP_DISTANCE) {
+      this.resizeSelectionMoved = true;
+    }
+
+    this.applySelectedStrokeResize(point);
+    this.requestRender();
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
+  applySelectedStrokeResize(point) {
+    const bounds = this.resizeSelectionOriginalBounds;
+    const handle = this.resizeSelectionHandle;
+    const originalStrokes = this.resizeSelectionOriginalStrokes;
+    if (!bounds || !handle || !originalStrokes?.size) {
+      return;
+    }
+
+    const anchor = getSelectionResizeAnchor(bounds, handle);
+    const corner = getSelectionResizeCorner(bounds, handle);
+    const originalDx = corner.x - anchor.x;
+    const originalDy = corner.y - anchor.y;
+    let scaleX = originalDx === 0 ? 1 : (point.x - anchor.x) / originalDx;
+    let scaleY = originalDy === 0 ? 1 : (point.y - anchor.y) / originalDy;
+    scaleX = Math.max(0.12, scaleX);
+    scaleY = Math.max(0.12, scaleY);
+    const strokeScale = clamp((Math.abs(scaleX) + Math.abs(scaleY)) / 2, 0.2, 8);
+
+    const nextByIndex = new Map();
+    for (const [index, original] of originalStrokes.entries()) {
+      nextByIndex.set(index, {
+        width: clamp((original.width || this.penWidth) * strokeScale, 0.5, 80),
+        points: original.points.map((strokePoint) => ({
+          x: anchor.x + (strokePoint.x - anchor.x) * scaleX,
+          y: anchor.y + (strokePoint.y - anchor.y) * scaleY,
+        })),
+      });
+    }
+
+    shiftNormalizedStrokesInsideCanvas(nextByIndex);
+
+    for (const [index, next] of nextByIndex.entries()) {
+      const stroke = this.doodleData.strokes[index];
+      if (!stroke) {
+        continue;
+      }
+
+      stroke.width = next.width;
+      stroke.points = next.points.map((strokePoint) => ({
+        x: clamp(strokePoint.x, 0, 1),
+        y: clamp(strokePoint.y, 0, 1),
+      }));
+    }
+  }
+
+  finishSelectedStrokeResize(event) {
+    if (this.resizeSelectionMoved) {
+      this.redoStack = [];
+      this.plugin.scheduleDoodleSave(this.file, this.doodleData);
+    } else {
+      this.cancelSelectedStrokeResize(true);
+    }
+
+    this.releasePointerCapture(event.pointerId);
+    this.clearSelectedStrokeResizeState();
+    this.render();
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
+  cancelSelectedStrokeResize(restoreOriginal = false) {
+    if (restoreOriginal && this.resizeSelectionOriginalStrokes?.size) {
+      for (const [index, original] of this.resizeSelectionOriginalStrokes.entries()) {
+        const stroke = this.doodleData.strokes[index];
+        if (stroke) {
+          stroke.width = original.width;
+          stroke.points = original.points.map((strokePoint) => ({ ...strokePoint }));
+        }
+      }
+    }
+
+    if (this.activePointerId !== null) {
+      this.releasePointerCapture(this.activePointerId);
+    }
+
+    this.clearSelectedStrokeResizeState();
+    this.render();
+  }
+
+  clearSelectedStrokeResizeState() {
+    this.resizingSelection = false;
+    this.resizeSelectionHandle = null;
+    this.resizeSelectionStartPoint = null;
+    this.resizeSelectionOriginalBounds = null;
+    this.resizeSelectionOriginalStrokes = null;
+    this.resizeSelectionMoved = false;
+    this.pointerStartClient = null;
+    this.activePointerId = null;
+    this.previewEl.removeClass("is-resizing-selection");
   }
 
   releasePointerCapture(pointerId) {
@@ -1205,7 +1914,7 @@ class PreviewDoodleController {
 
     const points = this.currentStroke.points;
     const from = points[points.length - 1];
-    const distance = pointDistanceOnCanvas(from, point, this.canvas.clientWidth, this.canvas.clientHeight);
+    const distance = pointDistanceOnCanvas(from, point, this.canvasWidth(), this.canvasHeight());
 
     if (distance <= DOODLE_MIN_POINT_DISTANCE_PX) {
       return;
@@ -1239,9 +1948,35 @@ class PreviewDoodleController {
 
   pointToCanvas(point) {
     return {
-      x: point.x * this.canvas.clientWidth,
-      y: point.y * this.canvas.clientHeight,
+      x: point.x * this.canvasWidth(),
+      y: point.y * this.canvasHeight(),
     };
+  }
+
+  canvasWidth() {
+    return Math.max(1, this.canvasCssWidth || this.canvas?.clientWidth || 1);
+  }
+
+  canvasHeight() {
+    return Math.max(1, this.canvasCssHeight || this.canvas?.clientHeight || 1);
+  }
+
+  requestRender() {
+    if (this.renderFrameId !== null) {
+      return;
+    }
+
+    this.renderFrameId = window.requestAnimationFrame(() => {
+      this.renderFrameId = null;
+      this.render();
+    });
+  }
+
+  cancelRenderFrame() {
+    if (this.renderFrameId !== null) {
+      window.cancelAnimationFrame(this.renderFrameId);
+      this.renderFrameId = null;
+    }
   }
 
   render() {
@@ -1249,15 +1984,22 @@ class PreviewDoodleController {
       return;
     }
 
-    this.ctx.clearRect(0, 0, this.canvas.clientWidth, this.canvas.clientHeight);
+    this.ctx.clearRect(0, 0, this.canvasWidth(), this.canvasHeight());
+    this.ensureStaticCache();
+    if (this.staticCanvas.width > 0 && this.staticCanvas.height > 0) {
+      this.ctx.drawImage(this.staticCanvas, 0, 0, this.canvasWidth(), this.canvasHeight());
+    }
 
     for (const [index, stroke] of this.doodleData.strokes.entries()) {
-      if (index === this.selectedStrokeIndex) {
+      if (this.isStrokeSelected(index)) {
         this.drawStroke(stroke, SELECTED_STROKE_ALPHA);
-        this.drawSelection(stroke);
-      } else {
-        this.drawStroke(stroke);
       }
+    }
+
+    this.drawSelection();
+
+    if (this.selectingStrokes && this.selectionStartPoint && this.selectionCurrentPoint) {
+      this.drawSelectionDragRect(this.selectionStartPoint, this.selectionCurrentPoint);
     }
 
     if (this.currentStroke && this.didMove) {
@@ -1265,29 +2007,103 @@ class PreviewDoodleController {
     }
   }
 
+  ensureStaticCache() {
+    if (!this.staticCtx || !this.staticCacheDirty) {
+      return;
+    }
+
+    this.staticCtx.clearRect(0, 0, this.canvasWidth(), this.canvasHeight());
+    for (const [index, stroke] of this.doodleData.strokes.entries()) {
+      if (!this.isStrokeSelected(index)) {
+        this.drawStrokeOn(this.staticCtx, stroke);
+      }
+    }
+    this.staticCacheDirty = false;
+  }
+
+  invalidateStaticCache() {
+    this.staticCacheDirty = true;
+  }
+
   drawStroke(stroke, alpha = 1) {
+    this.drawStrokeOn(this.ctx, stroke, alpha);
+  }
+
+  drawStrokeOn(ctx, stroke, alpha = 1) {
     if (!stroke.points.length) {
       return;
     }
 
-    this.ctx.save();
-    this.ctx.globalAlpha = alpha;
-    this.ctx.lineCap = "round";
-    this.ctx.lineJoin = "round";
-    this.ctx.strokeStyle = stroke.color || this.penColor;
-    this.ctx.lineWidth = stroke.width || this.penWidth;
-    this.ctx.beginPath();
-
-    const first = this.pointToCanvas(stroke.points[0]);
-    this.ctx.moveTo(first.x, first.y);
-
-    for (const point of stroke.points.slice(1)) {
-      const next = this.pointToCanvas(point);
-      this.ctx.lineTo(next.x, next.y);
+    if ((stroke.brush || BRUSH_PEN) === BRUSH_WATERCOLOR) {
+      this.drawWatercolorStrokeOn(ctx, stroke, alpha);
+      return;
     }
 
-    this.ctx.stroke();
-    this.ctx.restore();
+    const count = clamp(Math.round(Number(stroke.count || 1)), 1, MAX_PEN_COUNT);
+    const opacity = clamp(Number(stroke.opacity ?? DEFAULT_PEN_OPACITY), 0.1, 1);
+    const offsets = getPenOffsets(count, stroke.width || this.penWidth);
+
+    ctx.save();
+    ctx.globalAlpha = alpha * opacity;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.strokeStyle = stroke.color || this.penColor;
+    ctx.lineWidth = stroke.width || this.penWidth;
+
+    for (const offset of offsets) {
+      ctx.beginPath();
+      const first = this.pointToCanvas(stroke.points[0]);
+      ctx.moveTo(first.x + offset.x, first.y + offset.y);
+
+      for (let pointIndex = 1; pointIndex < stroke.points.length; pointIndex += 1) {
+        const next = this.pointToCanvas(stroke.points[pointIndex]);
+        ctx.lineTo(next.x + offset.x, next.y + offset.y);
+      }
+
+      ctx.stroke();
+    }
+
+    ctx.restore();
+  }
+
+  drawWatercolorStroke(stroke, alpha = 1) {
+    this.drawWatercolorStrokeOn(this.ctx, stroke, alpha);
+  }
+
+  drawWatercolorStrokeOn(ctx, stroke, alpha = 1) {
+    if (!stroke.points.length) {
+      return;
+    }
+
+    const width = Math.max(2, stroke.width || this.penWidth);
+    const opacity = clamp(Number(stroke.opacity ?? 0.34), 0.08, 1);
+    const layers = [
+      { width: width * 2.25, opacity: 0.12 },
+      { width: width * 1.45, opacity: 0.18 },
+      { width: width * 0.78, opacity: 0.26 },
+    ];
+
+    ctx.save();
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.strokeStyle = stroke.color || this.penColor;
+
+    for (const layer of layers) {
+      ctx.globalAlpha = alpha * opacity * layer.opacity;
+      ctx.lineWidth = layer.width;
+      ctx.beginPath();
+      const first = this.pointToCanvas(stroke.points[0]);
+      ctx.moveTo(first.x, first.y);
+
+      for (let pointIndex = 1; pointIndex < stroke.points.length; pointIndex += 1) {
+        const next = this.pointToCanvas(stroke.points[pointIndex]);
+        ctx.lineTo(next.x, next.y);
+      }
+
+      ctx.stroke();
+    }
+
+    ctx.restore();
   }
 
   drawStrokeSegment(stroke, fromPoint, toPoint) {
@@ -1309,13 +2125,18 @@ class PreviewDoodleController {
     this.ctx.restore();
   }
 
-  drawSelection(stroke) {
-    const bounds = getStrokeBounds(stroke, this.canvas.clientWidth, this.canvas.clientHeight);
+  drawSelection() {
+    const indexes = this.getSelectedStrokeIndexes();
+    if (!indexes.length) {
+      return;
+    }
+
+    const bounds = this.getSelectedStrokeBounds();
     if (!bounds) {
       return;
     }
 
-    const padding = Math.max(SELECT_STROKE_PADDING, (stroke.width || this.penWidth) + 4);
+    const padding = Math.max(SELECT_STROKE_PADDING, this.getSelectedStrokeMaxWidth() + 4);
     const x = bounds.minX - padding;
     const y = bounds.minY - padding;
     const width = bounds.maxX - bounds.minX + padding * 2;
@@ -1326,13 +2147,49 @@ class PreviewDoodleController {
     this.ctx.lineWidth = 2;
     this.ctx.setLineDash([6, 4]);
     this.ctx.strokeRect(x, y, width, height);
+    this.ctx.setLineDash([]);
+    this.ctx.fillStyle = "#ffffff";
+    this.ctx.strokeStyle = "rgba(255, 193, 7, 0.98)";
+    this.ctx.lineWidth = 2;
+    for (const handle of getSelectionHandlePointsFromRect({ x, y, width, height })) {
+      this.ctx.fillRect(
+        handle.x - SELECT_RESIZE_HANDLE_SIZE / 2,
+        handle.y - SELECT_RESIZE_HANDLE_SIZE / 2,
+        SELECT_RESIZE_HANDLE_SIZE,
+        SELECT_RESIZE_HANDLE_SIZE,
+      );
+      this.ctx.strokeRect(
+        handle.x - SELECT_RESIZE_HANDLE_SIZE / 2,
+        handle.y - SELECT_RESIZE_HANDLE_SIZE / 2,
+        SELECT_RESIZE_HANDLE_SIZE,
+        SELECT_RESIZE_HANDLE_SIZE,
+      );
+    }
+    this.ctx.restore();
+  }
+
+  drawSelectionDragRect(startPoint, endPoint) {
+    const start = this.pointToCanvas(startPoint);
+    const end = this.pointToCanvas(endPoint);
+    const x = Math.min(start.x, end.x);
+    const y = Math.min(start.y, end.y);
+    const width = Math.abs(end.x - start.x);
+    const height = Math.abs(end.y - start.y);
+
+    this.ctx.save();
+    this.ctx.strokeStyle = "rgba(96, 165, 250, 0.95)";
+    this.ctx.fillStyle = "rgba(96, 165, 250, 0.12)";
+    this.ctx.lineWidth = 2;
+    this.ctx.setLineDash([5, 4]);
+    this.ctx.fillRect(x, y, width, height);
+    this.ctx.strokeRect(x, y, width, height);
     this.ctx.restore();
   }
 
   findStrokeAt(point) {
     const hitPoint = this.pointToCanvas(point);
-    const width = this.canvas.clientWidth;
-    const height = this.canvas.clientHeight;
+    const width = this.canvasWidth();
+    const height = this.canvasHeight();
 
     for (let index = this.doodleData.strokes.length - 1; index >= 0; index -= 1) {
       const stroke = this.doodleData.strokes[index];
@@ -1346,27 +2203,156 @@ class PreviewDoodleController {
     return -1;
   }
 
-  selectedStrokeFrameContains(point) {
-    if (this.selectedStrokeIndex < 0 || this.selectedStrokeIndex >= this.doodleData.strokes.length) {
-      return false;
+  findStrokesInSelection(startPoint, endPoint) {
+    const start = this.pointToCanvas(startPoint);
+    const end = this.pointToCanvas(endPoint);
+    const rect = normalizeCanvasRect(start, end);
+    const indexes = [];
+
+    for (let index = 0; index < this.doodleData.strokes.length; index += 1) {
+      const stroke = this.doodleData.strokes[index];
+      const bounds = getStrokeBounds(stroke, this.canvasWidth(), this.canvasHeight());
+      if (bounds && rectsIntersect(rect, bounds)) {
+        indexes.push(index);
+      }
     }
 
-    const stroke = this.doodleData.strokes[this.selectedStrokeIndex];
-    const bounds = getStrokeBounds(stroke, this.canvas.clientWidth, this.canvas.clientHeight);
+    return indexes;
+  }
+
+  setSelectedStrokes(indexes) {
+    const normalized = Array.isArray(indexes) ? indexes : [indexes];
+    this.selectedStrokeIndexes = new Set(
+      normalized
+        .map((index) => Number(index))
+        .filter((index) => Number.isInteger(index) && index >= 0 && index < this.doodleData.strokes.length),
+    );
+    const selected = this.getSelectedStrokeIndexes();
+    this.selectedStrokeIndex = selected.length ? selected[selected.length - 1] : -1;
+    this.invalidateStaticCache();
+  }
+
+  clearSelectedStrokes() {
+    this.selectedStrokeIndexes.clear();
+    this.selectedStrokeIndex = -1;
+    this.invalidateStaticCache();
+  }
+
+  getSelectedStrokeIndexes() {
+    if (this.selectedStrokeIndexes.size) {
+      return Array.from(this.selectedStrokeIndexes)
+        .filter((index) => index >= 0 && index < this.doodleData.strokes.length)
+        .sort((a, b) => a - b);
+    }
+
+    if (this.selectedStrokeIndex >= 0 && this.selectedStrokeIndex < this.doodleData.strokes.length) {
+      return [this.selectedStrokeIndex];
+    }
+
+    return [];
+  }
+
+  isStrokeSelected(index) {
+    return this.selectedStrokeIndexes.has(index)
+      || (!this.selectedStrokeIndexes.size && this.selectedStrokeIndex === index);
+  }
+
+  getSelectedStrokeBounds() {
+    const indexes = this.getSelectedStrokeIndexes();
+    let result = null;
+
+    for (const index of indexes) {
+      const bounds = getStrokeBounds(this.doodleData.strokes[index], this.canvasWidth(), this.canvasHeight());
+      if (!bounds) {
+        continue;
+      }
+
+      result = result
+        ? {
+            minX: Math.min(result.minX, bounds.minX),
+            maxX: Math.max(result.maxX, bounds.maxX),
+            minY: Math.min(result.minY, bounds.minY),
+            maxY: Math.max(result.maxY, bounds.maxY),
+          }
+        : { ...bounds };
+    }
+
+    return result;
+  }
+
+  getSelectedStrokeNormalizedBounds() {
+    const bounds = this.getSelectedStrokeBounds();
+    const width = this.canvasWidth();
+    const height = this.canvasHeight();
+    if (!bounds || width <= 0 || height <= 0) {
+      return null;
+    }
+
+    return {
+      minX: clamp(bounds.minX / width, 0, 1),
+      minY: clamp(bounds.minY / height, 0, 1),
+      maxX: clamp(bounds.maxX / width, 0, 1),
+      maxY: clamp(bounds.maxY / height, 0, 1),
+    };
+  }
+
+  getSelectedStrokeMaxWidth() {
+    return this.getSelectedStrokeIndexes()
+      .map((index) => this.doodleData.strokes[index]?.width || this.penWidth)
+      .reduce((max, width) => Math.max(max, width), this.penWidth);
+  }
+
+  getSelectedFrameCanvasRect() {
+    if (!this.getSelectedStrokeIndexes().length) {
+      return null;
+    }
+
+    const bounds = this.getSelectedStrokeBounds();
     if (!bounds) {
+      return null;
+    }
+
+    const padding = Math.max(SELECT_STROKE_PADDING, this.getSelectedStrokeMaxWidth() + 4);
+    return {
+      x: bounds.minX - padding,
+      y: bounds.minY - padding,
+      width: bounds.maxX - bounds.minX + padding * 2,
+      height: bounds.maxY - bounds.minY + padding * 2,
+    };
+  }
+
+  findSelectionHandleAt(point) {
+    const rect = this.getSelectedFrameCanvasRect();
+    if (!rect) {
+      return null;
+    }
+
+    const hitPoint = this.pointToCanvas(point);
+    for (const handle of getSelectionHandlePointsFromRect(rect)) {
+      if (Math.abs(hitPoint.x - handle.x) <= SELECT_RESIZE_HANDLE_HIT_RADIUS
+        && Math.abs(hitPoint.y - handle.y) <= SELECT_RESIZE_HANDLE_HIT_RADIUS) {
+        return handle.handle;
+      }
+    }
+
+    return null;
+  }
+
+  selectedStrokeFrameContains(point) {
+    const rect = this.getSelectedFrameCanvasRect();
+    if (!rect) {
       return false;
     }
 
     const hitPoint = this.pointToCanvas(point);
-    const padding = Math.max(SELECT_STROKE_PADDING, (stroke.width || this.penWidth) + 4);
 
-    return hitPoint.x >= bounds.minX - padding
-      && hitPoint.x <= bounds.maxX + padding
-      && hitPoint.y >= bounds.minY - padding
-      && hitPoint.y <= bounds.maxY + padding;
+    return hitPoint.x >= rect.x
+      && hitPoint.x <= rect.x + rect.width
+      && hitPoint.y >= rect.y
+      && hitPoint.y <= rect.y + rect.height;
   }
 
-  startTextEdit(element) {
+  startTextEdit(element, clientPoint = null) {
     if (this.currentEditor === element) {
       return;
     }
@@ -1381,12 +2367,7 @@ class PreviewDoodleController {
     element.addClass("note-doodle-editing");
     element.focus();
 
-    const range = document.createRange();
-    range.selectNodeContents(element);
-    range.collapse(false);
-    const selection = window.getSelection();
-    selection.removeAllRanges();
-    selection.addRange(range);
+    placeCaretInEditable(element, clientPoint);
 
     const onInput = () => {
       this.plugin.scheduleTextSave(
@@ -1448,7 +2429,7 @@ class PreviewDoodleController {
 
     const removed = this.doodleData.strokes.pop();
     this.redoStack.push(removed);
-    this.selectedStrokeIndex = -1;
+    this.clearSelectedStrokes();
     this.plugin.scheduleDoodleSave(this.file, this.doodleData);
     this.render();
   }
@@ -1460,21 +2441,83 @@ class PreviewDoodleController {
 
     const restored = this.redoStack.pop();
     this.doodleData.strokes.push(restored);
-    this.selectedStrokeIndex = this.doodleData.strokes.length - 1;
+    this.setSelectedStrokes(this.doodleData.strokes.length - 1);
     this.plugin.scheduleDoodleSave(this.file, this.doodleData);
     this.render();
   }
 
   deleteSelectedStroke() {
-    if (this.selectedStrokeIndex < 0 || this.selectedStrokeIndex >= this.doodleData.strokes.length) {
+    const indexes = this.getSelectedStrokeIndexes();
+    if (!indexes.length) {
       return;
     }
 
-    this.doodleData.strokes.splice(this.selectedStrokeIndex, 1);
-    this.selectedStrokeIndex = -1;
+    for (const index of indexes.slice().sort((a, b) => b - a)) {
+      this.doodleData.strokes.splice(index, 1);
+    }
+    this.clearSelectedStrokes();
     this.redoStack = [];
     this.plugin.scheduleDoodleSave(this.file, this.doodleData);
     this.render();
+  }
+}
+
+class NoteDoodlePreviewSettingTab extends PluginSettingTab {
+  constructor(app, plugin) {
+    super(app, plugin);
+    this.plugin = plugin;
+  }
+
+  display() {
+    const { containerEl } = this;
+    containerEl.empty();
+    containerEl.createEl("h2", { text: "Note Doodle Preview" });
+
+    const codesContainer = containerEl.createDiv({ cls: "note-doodle-settings-codes" });
+    this.renderExtraCodes(codesContainer);
+  }
+
+  async renderExtraCodes(containerEl) {
+    const codeItems = (
+      await Promise.all(
+        SETTINGS_EXTRA_CODE_ASSETS.map(async (asset) => {
+          const src = await this.plugin.getOptionalAssetResourcePath(asset.path);
+          return src ? { ...asset, src } : null;
+        }),
+      )
+    ).filter(Boolean);
+
+    if (!codeItems.length) {
+      containerEl.remove();
+      return;
+    }
+
+    containerEl.createDiv({
+      cls: "note-doodle-settings-codes-title",
+      text: "给我买咖啡 / Buy me a coffee",
+    });
+    containerEl.createDiv({
+      cls: "note-doodle-settings-codes-subtitle",
+      text: "如果这个插件帮到你，可以扫码打赏支持继续维护 / If this tool helps, tips are appreciated.",
+    });
+
+    const gridEl = containerEl.createDiv({ cls: "note-doodle-settings-codes-grid" });
+    for (const item of codeItems) {
+      const codeEl = gridEl.createDiv({ cls: "note-doodle-settings-code" });
+      const imageEl = codeEl.createEl("img", {
+        cls: "note-doodle-settings-code-image",
+        attr: {
+          alt: item.label,
+          loading: "lazy",
+          src: item.src,
+        },
+      });
+      imageEl.src = item.src;
+      codeEl.createDiv({
+        cls: "note-doodle-settings-code-label",
+        text: item.label,
+      });
+    }
   }
 }
 
@@ -1508,6 +2551,54 @@ function normalizeRenderedText(value) {
     .filter(Boolean)
     .join("\n")
     .trim();
+}
+
+function placeCaretInEditable(element, clientPoint) {
+  const selection = window.getSelection?.();
+  if (!selection) {
+    return;
+  }
+
+  const range = rangeFromClientPoint(element, clientPoint) || rangeAtEditableEnd(element);
+  if (!range) {
+    return;
+  }
+
+  selection.removeAllRanges();
+  selection.addRange(range);
+}
+
+function rangeFromClientPoint(element, clientPoint) {
+  if (!clientPoint || !Number.isFinite(clientPoint.x) || !Number.isFinite(clientPoint.y)) {
+    return null;
+  }
+
+  let range = null;
+
+  if (typeof document.caretRangeFromPoint === "function") {
+    range = document.caretRangeFromPoint(clientPoint.x, clientPoint.y);
+  } else if (typeof document.caretPositionFromPoint === "function") {
+    const position = document.caretPositionFromPoint(clientPoint.x, clientPoint.y);
+    if (position?.offsetNode) {
+      range = document.createRange();
+      range.setStart(position.offsetNode, position.offset);
+      range.collapse(true);
+    }
+  }
+
+  if (!range || !element.contains(range.startContainer)) {
+    return null;
+  }
+
+  range.collapse(true);
+  return range;
+}
+
+function rangeAtEditableEnd(element) {
+  const range = document.createRange();
+  range.selectNodeContents(element);
+  range.collapse(false);
+  return range;
 }
 
 function normalizeMarkdownBlock(value) {
@@ -1680,6 +2771,35 @@ function findRootPreviewForView(view) {
   return previews.find((preview) => !isEmbeddedPreview(preview)) || null;
 }
 
+function isSourceMode(view) {
+  try {
+    if (typeof view?.getMode === "function") {
+      return view.getMode() === "source";
+    }
+  } catch (_) {
+    // Fall through to state/DOM checks.
+  }
+
+  const stateMode = view?.getState?.()?.mode;
+  if (stateMode) {
+    return stateMode === "source";
+  }
+
+  return Boolean(findSourceSurfaceForView(view));
+}
+
+function findSourceSurfaceForView(view) {
+  const container = view?.containerEl;
+  if (!container) {
+    return null;
+  }
+
+  return container.querySelector(".markdown-source-view .cm-scroller")
+    || container.querySelector(".markdown-source-view .cm-editor")
+    || container.querySelector(".markdown-source-view")
+    || null;
+}
+
 function isEmbeddedPreview(preview) {
   return Boolean(preview.closest(".markdown-embed, .markdown-embed-content, .internal-embed, .external-embed"));
 }
@@ -1691,9 +2811,9 @@ function cleanupAllDoodleHeaderButtons() {
 }
 
 function cleanupDoodleUi(preview) {
-  preview.querySelectorAll(".note-doodle-button, .note-doodle-fallback-button, .note-doodle-toolbar, .note-doodle-canvas")
+  preview.querySelectorAll(".note-doodle-button, .note-doodle-fallback-button, .note-doodle-toolbar, .note-doodle-palette-panel, .note-doodle-canvas")
     .forEach((element) => element.remove());
-  preview.classList.remove("note-doodle-shell", "is-doodle-active", "is-doodle-hidden");
+  preview.classList.remove("note-doodle-shell", "is-doodle-active", "is-doodle-hidden", "is-select-mode", "is-palette-open", "is-watercolor-mode", "is-selecting-strokes", "is-resizing-selection");
 }
 
 function normalizeVaultPath(path) {
@@ -1717,6 +2837,10 @@ function normalizeDoodleData(data, file) {
     sourcePath: file.path,
     strokes: strokes
       .map(normalizeStroke)
+      .map((stroke) => ({
+        ...stroke,
+        points: compactStrokePoints(stroke.points),
+      }))
       .filter((stroke) => stroke.points.length),
     updatedAt: data?.updatedAt || null,
   };
@@ -1726,8 +2850,11 @@ function normalizeStroke(stroke) {
   const points = Array.isArray(stroke?.points) ? stroke.points : [];
 
   return {
+    brush: stroke?.brush === BRUSH_WATERCOLOR ? BRUSH_WATERCOLOR : BRUSH_PEN,
     color: typeof stroke?.color === "string" ? stroke.color : "#e53935",
     width: Number.isFinite(Number(stroke?.width)) ? Number(stroke.width) : 3,
+    opacity: clamp(Number(stroke?.opacity ?? DEFAULT_PEN_OPACITY), 0.1, 1),
+    count: clamp(Math.round(Number(stroke?.count) || 1), 1, MAX_PEN_COUNT),
     points: points
       .map((point) => ({
         x: clamp(Number(point?.x), 0, 1),
@@ -1736,6 +2863,39 @@ function normalizeStroke(stroke) {
       }))
       .filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y)),
   };
+}
+
+function compactDoodleData(data) {
+  if (!Array.isArray(data?.strokes)) {
+    return data;
+  }
+
+  data.strokes = data.strokes.map((stroke) => ({
+    ...stroke,
+    points: compactStrokePoints(stroke.points),
+  }));
+  return data;
+}
+
+function compactStrokePoints(points) {
+  if (!Array.isArray(points) || points.length <= 2) {
+    return points || [];
+  }
+
+  const compacted = [points[0]];
+
+  for (let index = 1; index < points.length - 1; index += 1) {
+    const point = points[index];
+    const last = compacted[compacted.length - 1];
+    const distance = pointDistanceOnCanvas(last, point, 1, 1) * 1000;
+
+    if (distance >= DOODLE_COMPACT_DISTANCE_PX) {
+      compacted.push(point);
+    }
+  }
+
+  compacted.push(points[points.length - 1]);
+  return compacted;
 }
 
 function getSourceInfo(element) {
@@ -2329,6 +3489,134 @@ function getStrokeBounds(stroke, width, height) {
     maxX: Math.max(...xs),
     maxY: Math.max(...ys),
   };
+}
+
+function normalizeCanvasRect(a, b) {
+  return {
+    minX: Math.min(a.x, b.x),
+    minY: Math.min(a.y, b.y),
+    maxX: Math.max(a.x, b.x),
+    maxY: Math.max(a.y, b.y),
+  };
+}
+
+function rectsIntersect(a, b) {
+  return a.minX <= b.maxX
+    && a.maxX >= b.minX
+    && a.minY <= b.maxY
+    && a.maxY >= b.minY;
+}
+
+function getSelectionHandlePointsFromRect(rect) {
+  return [
+    { handle: "nw", x: rect.x, y: rect.y },
+    { handle: "ne", x: rect.x + rect.width, y: rect.y },
+    { handle: "sw", x: rect.x, y: rect.y + rect.height },
+    { handle: "se", x: rect.x + rect.width, y: rect.y + rect.height },
+  ];
+}
+
+function getSelectionResizeAnchor(bounds, handle) {
+  if (handle === "nw") {
+    return { x: bounds.maxX, y: bounds.maxY };
+  }
+
+  if (handle === "ne") {
+    return { x: bounds.minX, y: bounds.maxY };
+  }
+
+  if (handle === "sw") {
+    return { x: bounds.maxX, y: bounds.minY };
+  }
+
+  return { x: bounds.minX, y: bounds.minY };
+}
+
+function getSelectionResizeCorner(bounds, handle) {
+  if (handle === "nw") {
+    return { x: bounds.minX, y: bounds.minY };
+  }
+
+  if (handle === "ne") {
+    return { x: bounds.maxX, y: bounds.minY };
+  }
+
+  if (handle === "sw") {
+    return { x: bounds.minX, y: bounds.maxY };
+  }
+
+  return { x: bounds.maxX, y: bounds.maxY };
+}
+
+function shiftNormalizedStrokesInsideCanvas(strokesByIndex) {
+  let bounds = null;
+
+  for (const stroke of strokesByIndex.values()) {
+    for (const point of stroke.points) {
+      bounds = bounds
+        ? {
+            minX: Math.min(bounds.minX, point.x),
+            minY: Math.min(bounds.minY, point.y),
+            maxX: Math.max(bounds.maxX, point.x),
+            maxY: Math.max(bounds.maxY, point.y),
+          }
+        : {
+            minX: point.x,
+            minY: point.y,
+            maxX: point.x,
+            maxY: point.y,
+          };
+    }
+  }
+
+  if (!bounds) {
+    return;
+  }
+
+  let dx = 0;
+  let dy = 0;
+
+  if (bounds.minX < 0) {
+    dx = -bounds.minX;
+  } else if (bounds.maxX > 1) {
+    dx = 1 - bounds.maxX;
+  }
+
+  if (bounds.minY < 0) {
+    dy = -bounds.minY;
+  } else if (bounds.maxY > 1) {
+    dy = 1 - bounds.maxY;
+  }
+
+  if (dx === 0 && dy === 0) {
+    return;
+  }
+
+  for (const stroke of strokesByIndex.values()) {
+    stroke.points = stroke.points.map((point) => ({
+      x: point.x + dx,
+      y: point.y + dy,
+    }));
+  }
+}
+
+function getPenOffsets(count, width) {
+  if (count <= 1) {
+    return [{ x: 0, y: 0 }];
+  }
+
+  const radius = Math.max(2, Number(width || 3) * 1.15);
+  const offsets = [{ x: 0, y: 0 }];
+
+  for (let index = 1; index < count; index += 1) {
+    const angle = ((index - 1) / Math.max(1, count - 1)) * Math.PI * 2;
+    offsets.push({
+      x: Math.cos(angle) * radius,
+      y: Math.sin(angle) * radius,
+    });
+  }
+
+  return offsets;
 }
 
 function strokeHitTest(stroke, hitPoint, width, height, threshold) {
