@@ -1,24 +1,28 @@
-.note-doodle-shell {
+.notedraw-shell {
   position: relative;
 }
 
-.note-doodle-shell.is-note-doodle-source-shell {
+.notedraw-shell.is-notedraw-source-shell {
   position: relative;
 }
 
-.note-doodle-header-button.is-active {
+.notedraw-header-button.is-active {
   color: var(--interactive-accent);
   background: var(--background-modifier-hover);
 }
 
-.note-doodle-fallback-button {
+.notedraw-header-button {
+  border-radius: 999px !important;
+}
+
+.notedraw-fallback-button {
   position: absolute;
   z-index: 70;
   top: 8px;
   right: 12px;
 }
 
-.note-doodle-canvas {
+.notedraw-canvas {
   position: absolute;
   z-index: 60;
   top: 0;
@@ -32,86 +36,87 @@
   user-select: none;
 }
 
-.note-doodle-shell.is-doodle-active .note-doodle-canvas {
+.notedraw-shell.is-drawing-active .notedraw-canvas {
   pointer-events: auto;
   cursor: crosshair;
 }
 
-.note-doodle-shell.is-note-doodle-source-shell .note-doodle-canvas {
+.notedraw-shell.is-notedraw-source-shell .notedraw-canvas {
   z-index: 20;
 }
 
-.note-doodle-shell.is-two-finger-scroll .note-doodle-canvas {
+.notedraw-shell.is-two-finger-scroll .notedraw-canvas {
   cursor: grab;
 }
 
-.note-doodle-shell.is-moving-selection .note-doodle-canvas {
+.notedraw-shell.is-moving-selection .notedraw-canvas {
   cursor: move;
 }
 
-.note-doodle-shell.is-resizing-selection .note-doodle-canvas {
+.notedraw-shell.is-resizing-selection .notedraw-canvas {
   cursor: nwse-resize;
 }
 
-.note-doodle-shell.is-doodle-hidden .note-doodle-canvas {
+.notedraw-shell.is-drawing-hidden .notedraw-canvas {
   opacity: 0;
 }
 
-.note-doodle-editing {
+.notedraw-editing {
   outline: 2px solid var(--interactive-accent);
   outline-offset: 3px;
   border-radius: 4px;
   background: color-mix(in srgb, var(--interactive-accent) 10%, transparent);
 }
 
-.note-doodle-saving {
+.notedraw-saving {
   opacity: 0.82;
 }
 
-.note-doodle-toolbar {
+.notedraw-toolbar {
   position: fixed;
   z-index: 1001;
-  top: var(--note-doodle-toolbar-top, 48px);
+  top: var(--notedraw-toolbar-top, 48px);
   left: auto;
-  right: var(--note-doodle-toolbar-right, 8px);
+  right: var(--notedraw-toolbar-right, 8px);
   display: none;
   gap: 3px;
   align-items: center;
   padding: 4px;
   border: 1px solid var(--background-modifier-border);
-  border-radius: 8px;
+  border-radius: 999px;
   background: color-mix(in srgb, var(--background-primary) 88%, var(--background-secondary));
   box-shadow: 0 1px 5px rgba(0, 0, 0, 0.10);
   max-width: calc(100vw - 16px);
 }
 
-.note-doodle-shell.is-doodle-active .note-doodle-toolbar {
+.notedraw-shell.is-drawing-active .notedraw-toolbar {
   display: inline-flex;
 }
 
-.note-doodle-toolbar button {
+.notedraw-toolbar button {
   width: 28px;
   height: 28px;
+  min-width: 28px;
   box-sizing: border-box;
   padding: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   border: 1px solid transparent;
-  border-radius: 5px;
+  border-radius: 999px;
   color: var(--text-muted);
   background: transparent;
   cursor: pointer;
 }
 
-.note-doodle-toolbar button.is-active {
+.notedraw-toolbar button.is-active {
   color: var(--interactive-accent);
   background: color-mix(in srgb, var(--interactive-accent) 12%, transparent);
   border-color: color-mix(in srgb, var(--interactive-accent) 24%, transparent);
 }
 
-.note-doodle-toolbar button svg,
-.note-doodle-toolbar button .svg-icon {
+.notedraw-toolbar button svg,
+.notedraw-toolbar button .svg-icon {
   width: 20px !important;
   height: 20px !important;
   min-width: 20px;
@@ -119,33 +124,45 @@
   stroke-width: 1.7;
 }
 
-.note-doodle-shell.is-watercolor-mode .note-doodle-toolbar button.is-active {
+.notedraw-shell.is-watercolor-mode .notedraw-toolbar button.is-active {
   color: #2563eb;
   background: color-mix(in srgb, #60a5fa 16%, transparent);
   border-color: color-mix(in srgb, #2563eb 34%, transparent);
   box-shadow: inset 0 -2px 0 color-mix(in srgb, #2563eb 55%, transparent);
 }
 
-.note-doodle-toolbar button:hover {
+.notedraw-toolbar button:hover {
   color: var(--text-normal);
   background: var(--background-modifier-hover);
   border-color: transparent;
 }
 
-.note-doodle-shell.is-select-mode .note-doodle-canvas {
+.notedraw-toolbar button:disabled {
+  opacity: 0.38;
+  cursor: default;
+  background: transparent;
+  color: var(--text-faint);
+}
+
+.notedraw-toolbar button:disabled:hover {
+  background: transparent;
+  color: var(--text-faint);
+}
+
+.notedraw-shell.is-select-mode .notedraw-canvas {
   cursor: crosshair;
 }
 
-.note-doodle-shell.is-selecting-strokes .note-doodle-canvas {
+.notedraw-shell.is-selecting-strokes .notedraw-canvas {
   cursor: cell;
 }
 
-.note-doodle-palette-panel {
+.notedraw-palette-panel {
   position: fixed;
   z-index: 1002;
-  top: var(--note-doodle-palette-top, 92px);
+  top: var(--notedraw-palette-top, 92px);
   left: auto;
-  right: var(--note-doodle-toolbar-right, 8px);
+  right: var(--notedraw-toolbar-right, 8px);
   display: none;
   min-width: 210px;
   padding: 8px;
@@ -155,36 +172,36 @@
   box-shadow: 0 2px 10px rgba(0, 0, 0, 0.14);
 }
 
-.note-doodle-shell.is-doodle-active.is-palette-open .note-doodle-palette-panel {
+.notedraw-shell.is-drawing-active.is-palette-open .notedraw-palette-panel {
   display: grid;
   gap: 8px;
 }
 
-.note-doodle-palette-row {
+.notedraw-palette-row {
   display: grid;
   grid-template-columns: 24px minmax(0, 1fr);
   gap: 8px;
   align-items: center;
 }
 
-.note-doodle-palette-icon {
+.notedraw-palette-icon {
   color: var(--text-muted);
   display: inline-flex;
   align-items: center;
   justify-content: center;
 }
 
-.note-doodle-palette-icon svg,
-.note-doodle-palette-icon .svg-icon {
+.notedraw-palette-icon svg,
+.notedraw-palette-icon .svg-icon {
   width: 18px;
   height: 18px;
 }
 
-.note-doodle-palette-row input[type="range"] {
+.notedraw-palette-row input[type="range"] {
   width: 100%;
 }
 
-.note-doodle-palette-row input[type="color"] {
+.notedraw-palette-row input[type="color"] {
   width: 100%;
   height: 28px;
   padding: 0;
@@ -193,37 +210,37 @@
   background: transparent;
 }
 
-.note-doodle-settings-codes {
+.notedraw-settings-codes {
   margin-top: 28px;
   padding-top: 18px;
   border-top: 1px solid var(--background-modifier-border);
 }
 
-.note-doodle-settings-codes-title {
+.notedraw-settings-codes-title {
   margin-bottom: 4px;
   color: var(--text-normal);
   font-size: var(--font-ui-medium);
   font-weight: 600;
 }
 
-.note-doodle-settings-codes-subtitle {
+.notedraw-settings-codes-subtitle {
   margin-bottom: 12px;
   color: var(--text-muted);
   font-size: var(--font-ui-small);
   line-height: 1.35;
 }
 
-.note-doodle-settings-codes-grid {
+.notedraw-settings-codes-grid {
   display: flex;
   flex-wrap: wrap;
   gap: 14px;
 }
 
-.note-doodle-settings-code {
+.notedraw-settings-code {
   width: 132px;
 }
 
-.note-doodle-settings-code-image {
+.notedraw-settings-code-image {
   display: block;
   width: 132px;
   height: 132px;
@@ -233,9 +250,10 @@
   background: #fff;
 }
 
-.note-doodle-settings-code-label {
+.notedraw-settings-code-label {
   margin-top: 6px;
   color: var(--text-muted);
   font-size: var(--font-ui-smaller);
   text-align: center;
 }
+

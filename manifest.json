@@ -1,10 +1,11 @@
 {
-  "id": "note-doodle-preview",
-  "name": "Note Doodle Preview",
-  "version": "0.1.24",
+  "id": "notedraw",
+  "name": "NoteDraw",
+  "version": "0.2.0",
   "minAppVersion": "1.5.0",
-  "description": "Prototype: edit rendered text and draw doodles directly in Obsidian reading preview.",
+  "description": "Draw and edit directly on Obsidian notes.",
   "author": "Codex",
   "authorUrl": "",
   "isDesktopOnly": false
 }
+

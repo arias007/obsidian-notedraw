@@ -5,12 +5,15 @@ const {
   Notice,
   Plugin,
   PluginSettingTab,
+  Setting,
   normalizePath,
   setIcon,
 } = require("obsidian");
 
-const PLUGIN_ID = "note-doodle-preview";
-const DOODLE_DIR = `${PLUGIN_ID}/doodles`;
+const PLUGIN_ID = "notedraw";
+const DRAWING_DIR = `${PLUGIN_ID}/drawings`;
+const LEGACY_PLUGIN_ID = "note-doodle-preview";
+const LEGACY_DRAWING_DIR = `${LEGACY_PLUGIN_ID}/doodles`;
 const DEBUG_LOG_FILE = "debug-log.jsonl";
 const DEBUG_LOG_LIMIT = 150;
 const TEXT_SAVE_DELAY_MS = 160;
@@ -20,9 +23,9 @@ const SELECT_STROKE_PADDING = 8;
 const SELECTED_STROKE_ALPHA = 0.38;
 const SELECT_RESIZE_HANDLE_SIZE = 10;
 const SELECT_RESIZE_HANDLE_HIT_RADIUS = 15;
-const DOODLE_INTERPOLATION_STEP_PX = 3;
-const DOODLE_MIN_POINT_DISTANCE_PX = 0.55;
-const DOODLE_COMPACT_DISTANCE_PX = 1.1;
+const DRAWING_INTERPOLATION_STEP_PX = 3;
+const DRAWING_MIN_POINT_DISTANCE_PX = 0.55;
+const DRAWING_COMPACT_DISTANCE_PX = 1.1;
 const MAX_PEN_COUNT = 5;
 const MIN_BRUSH_WIDTH = 0.5;
 const MAX_BRUSH_WIDTH = 32;
@@ -35,6 +38,16 @@ const SETTINGS_EXTRA_CODE_ASSETS = [
   { path: "extras/code-1.jpg", label: "给我买咖啡 / Buy me a coffee" },
   { path: "extras/code-2.png", label: "支持继续维护 / Support this tool" },
 ];
+const DEFAULT_SETTINGS = {
+  defaultPenColor: "#e53935",
+  defaultPenWidth: 3,
+  defaultPenOpacity: DEFAULT_PEN_OPACITY,
+  defaultWatercolorColor: "#3b82f6",
+  defaultWatercolorWidth: 9,
+  defaultWatercolorOpacity: 0.45,
+  toolbarTopOffset: 6,
+  enableDebugLog: false,
+};
 const EDITABLE_SELECTOR = [
   ".markdown-preview-view h1",
   ".markdown-preview-view h2",
@@ -51,10 +64,10 @@ const EDITABLE_SELECTOR = [
 ].join(",");
 
 const BLOCKED_EDIT_SELECTOR = [
-  ".note-doodle-button",
-  ".note-doodle-toolbar",
-  ".note-doodle-palette-panel",
-  ".note-doodle-canvas",
+  ".notedraw-button",
+  ".notedraw-toolbar",
+  ".notedraw-palette-panel",
+  ".notedraw-canvas",
   "a",
   "button",
   "input",
@@ -72,21 +85,26 @@ const BLOCKED_EDIT_SELECTOR = [
   ".metadata-container",
 ].join(",");
 
-module.exports = class NoteDoodlePreviewPlugin extends Plugin {
+module.exports = class NoteDrawPlugin extends Plugin {
   async onload() {
+    this.settings = { ...DEFAULT_SETTINGS, ...((await this.loadData()) || {}) };
     this.controllers = new WeakMap();
     this.sourceControllers = new Map();
     this.headerActions = new Map();
     this.saveTimers = new Map();
     this.textSaveStates = new WeakMap();
-    cleanupAllDoodleHeaderButtons();
+    this.api = this.createPublicApi();
+    if (typeof window !== "undefined") {
+      window.NoteDraw = this.api;
+    }
+    cleanupAllDrawingHeaderButtons();
 
     this.addCommand({
-      id: "toggle-note-doodle-preview",
-      name: "Toggle preview edit and doodle mode",
+      id: "toggle-notedraw",
+      name: "Toggle preview edit and drawing mode",
       callback: () => this.toggleActiveController(),
     });
-    this.addSettingTab(new NoteDoodlePreviewSettingTab(this.app, this));
+    this.addSettingTab(new NoteDrawSettingTab(this.app, this));
 
     const syncSource = () => this.syncSourceControllers();
     this.registerEvent(this.app.workspace.on("layout-change", syncSource));
@@ -107,7 +125,7 @@ module.exports = class NoteDoodlePreviewPlugin extends Plugin {
 
       annotateEditableElements(el, ctx);
 
-      const existingController = this.controllers.get(preview) || preview._noteDoodleController;
+      const existingController = this.controllers.get(preview) || preview._noteDrawController;
       if (existingController?.plugin === this) {
         existingController.setFile(view.file).catch((error) => {
           console.error(`[${PLUGIN_ID}] Failed to switch preview controller file`, error);
@@ -119,9 +137,9 @@ module.exports = class NoteDoodlePreviewPlugin extends Plugin {
         existingController.destroy();
       }
 
-      cleanupDoodleUi(preview);
+      cleanupDrawingUi(preview);
 
-      const controller = new PreviewDoodleController(this, preview, view, view.file);
+      const controller = new PreviewDrawingController(this, preview, view, view.file);
       this.controllers.set(preview, controller);
       controller.mount();
       this.register(() => controller.destroy());
@@ -138,12 +156,81 @@ module.exports = class NoteDoodlePreviewPlugin extends Plugin {
       state.button?.remove();
     }
     this.headerActions.clear();
-    cleanupAllDoodleHeaderButtons();
+    cleanupAllDrawingHeaderButtons();
 
     for (const timer of this.saveTimers.values()) {
       clearTimeout(timer);
     }
     this.saveTimers.clear();
+
+    if (typeof window !== "undefined" && window.NoteDraw === this.api) {
+      delete window.NoteDraw;
+    }
+  }
+
+  async saveSettings() {
+    this.settings = sanitizeSettings(this.settings);
+    await this.saveData(this.settings);
+    for (const controller of this.getAllControllers()) {
+      controller.applySettings();
+    }
+  }
+
+  getAllControllers() {
+    const controllers = [];
+    for (const controller of this.sourceControllers.values()) {
+      controllers.push(controller);
+    }
+    document
+      .querySelectorAll(".notedraw-shell")
+      .forEach((element) => {
+        const controller = element._noteDrawController;
+        if (controller?.plugin === this && !controllers.includes(controller)) {
+          controllers.push(controller);
+        }
+      });
+    return controllers;
+  }
+
+  createPublicApi() {
+    return {
+      version: "0.2.0",
+      getActiveController: () => {
+        const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+        if (!view) {
+          return null;
+        }
+        return this.resolveHeaderController(view, this.headerActions.get(view) || {});
+      },
+      readDrawings: async (file) => this.readDrawings(file),
+      writeDrawings: async (file, data) => this.writeDrawings(file, normalizeDrawingData(data, file)),
+      getStoragePaths: (file) => ({
+        current: this.drawingPathForFile(file),
+        legacy: this.legacyDrawingPathForFile(file),
+      }),
+      replaceSelectionText: async (file, originalText, editedText) => {
+        if (!file) {
+          return { changed: false, reason: "missing-file" };
+        }
+        const sourceInfo = null;
+        const source = await this.app.vault.read(file);
+        const target = resolveSourceEditTarget(source, sourceInfo, originalText);
+        if (!target) {
+          return { changed: false, reason: "target-not-found" };
+        }
+        return this.saveTextBlock(file, originalText, editedText, sourceInfo, target);
+      },
+      insertStroke: async (file, stroke) => {
+        const data = await this.readDrawings(file);
+        const normalized = normalizeStroke(stroke);
+        if (!normalized.points.length) {
+          return data;
+        }
+        data.strokes.push(normalized);
+        await this.writeDrawings(file, data);
+        return data;
+      },
+    };
   }
 
   toggleActiveController() {
@@ -151,14 +238,16 @@ module.exports = class NoteDoodlePreviewPlugin extends Plugin {
     const surface = view
       ? (isSourceMode(view) ? findSourceSurfaceForView(view) || findRootPreviewForView(view) : findRootPreviewForView(view) || findSourceSurfaceForView(view))
       : null;
-    const controller = surface ? this.controllers.get(surface) || surface._noteDoodleController : null;
+    const controller = surface ? this.controllers.get(surface) || surface._noteDrawController : null;
 
     if (!controller) {
       new Notice("Open a note first.");
       return;
     }
 
-    controller.toggle();
+    controller.toggle().catch((error) => {
+      console.error(`[${PLUGIN_ID}] Failed to toggle NoteDraw`, error);
+    });
   }
 
   syncSourceControllers() {
@@ -196,21 +285,21 @@ module.exports = class NoteDoodlePreviewPlugin extends Plugin {
         existing.destroy();
       }
 
-      const mountedOnElement = this.controllers.get(sourceEl) || sourceEl._noteDoodleController;
+      const mountedOnElement = this.controllers.get(sourceEl) || sourceEl._noteDrawController;
       if (mountedOnElement?.destroy) {
         mountedOnElement.destroy();
       }
 
-      cleanupDoodleUi(sourceEl);
+      cleanupDrawingUi(sourceEl);
 
-      const controller = new PreviewDoodleController(this, sourceEl, view, view.file, {
+      const controller = new PreviewDrawingController(this, sourceEl, view, view.file, {
         allowTextEdit: false,
         surfaceType: "source",
       });
       this.controllers.set(sourceEl, controller);
       this.sourceControllers.set(view, controller);
       controller.mount().catch((error) => {
-        console.error(`[${PLUGIN_ID}] Failed to mount source doodle controller`, error);
+        console.error(`[${PLUGIN_ID}] Failed to mount source drawing controller`, error);
       });
       this.register(() => controller.destroy());
     }
@@ -254,7 +343,7 @@ module.exports = class NoteDoodlePreviewPlugin extends Plugin {
           actions.appendChild(button);
         } else {
           controller.previewEl.appendChild(button);
-          button.classList.add("note-doodle-fallback-button");
+          button.classList.add("notedraw-fallback-button");
         }
       }
 
@@ -270,8 +359,8 @@ module.exports = class NoteDoodlePreviewPlugin extends Plugin {
     state.controllers ??= new Set();
     state.controllers.add(controller);
     state.controller = this.pickHeaderController(view, state, controller);
-    state.button._noteDoodleController = controller;
-    state.button.classList.add("note-doodle-header-button");
+    state.button._noteDrawController = controller;
+    state.button.classList.add("notedraw-header-button");
     state.button.setAttribute("aria-label", "Edit text / draw");
     state.button.setAttribute("title", "Edit text / draw");
     state.button.classList.toggle("is-active", controller.active);
@@ -292,12 +381,12 @@ module.exports = class NoteDoodlePreviewPlugin extends Plugin {
     }
 
     if (state.controller) {
-      state.button._noteDoodleController = state.controller;
+      state.button._noteDrawController = state.controller;
       state.button.classList.toggle("is-active", state.controller.active);
       return;
     }
 
-    state.button?._noteDoodleController && delete state.button._noteDoodleController;
+    state.button?._noteDrawController && delete state.button._noteDrawController;
     state.button?.classList.remove("is-active");
     if (!controller.view?.containerEl?.isConnected) {
       state.button?.remove();
@@ -310,7 +399,7 @@ module.exports = class NoteDoodlePreviewPlugin extends Plugin {
     const controller = this.pickHeaderController(view, state);
     if (controller) {
       state.controller = controller;
-      state.button._noteDoodleController = controller;
+      state.button._noteDrawController = controller;
       state.button.classList.toggle("is-active", controller.active);
     }
 
@@ -332,7 +421,7 @@ module.exports = class NoteDoodlePreviewPlugin extends Plugin {
 
   cleanupHeaderButtons(view, keepButton = null) {
     view?.containerEl
-      ?.querySelectorAll(".note-doodle-header-button")
+      ?.querySelectorAll(".notedraw-header-button")
       .forEach((button) => {
         if (button !== keepButton) {
           button.remove();
@@ -340,16 +429,16 @@ module.exports = class NoteDoodlePreviewPlugin extends Plugin {
       });
   }
 
-  async ensureDoodleDir() {
+  async ensureDrawingDir() {
     const base = this.app.vault.configDir;
     const pluginDir = `${base}/plugins/${PLUGIN_ID}`;
-    const doodleDir = `${pluginDir}/doodles`;
+    const drawingDir = `${pluginDir}/drawings`;
 
     await this.ensureFolder(`${base}/plugins`);
     await this.ensureFolder(pluginDir);
-    await this.ensureFolder(doodleDir);
+    await this.ensureFolder(drawingDir);
 
-    return doodleDir;
+    return drawingDir;
   }
 
   async ensureFolder(path) {
@@ -365,13 +454,21 @@ module.exports = class NoteDoodlePreviewPlugin extends Plugin {
     }
   }
 
-  doodlePathForFile(file) {
+  encodedDrawingNameForFile(file) {
     const encoded = file.path
       .replace(/\\/g, "/")
       .replace(/[^a-zA-Z0-9._/-]/g, "_")
       .replace(/\//g, "__");
 
-    return `${this.app.vault.configDir}/plugins/${DOODLE_DIR}/${encoded}.json`;
+    return `${encoded}.json`;
+  }
+
+  drawingPathForFile(file) {
+    return `${this.app.vault.configDir}/plugins/${DRAWING_DIR}/${this.encodedDrawingNameForFile(file)}`;
+  }
+
+  legacyDrawingPathForFile(file) {
+    return `${this.app.vault.configDir}/plugins/${LEGACY_DRAWING_DIR}/${this.encodedDrawingNameForFile(file)}`;
   }
 
   debugLogPath() {
@@ -379,8 +476,12 @@ module.exports = class NoteDoodlePreviewPlugin extends Plugin {
   }
 
   async appendDebugLog(entry) {
+    if (!this.settings?.enableDebugLog) {
+      return;
+    }
+
     try {
-      await this.ensureDoodleDir();
+      await this.ensureDrawingDir();
 
       const path = this.debugLogPath();
       const adapter = this.app.vault.adapter;
@@ -404,24 +505,31 @@ module.exports = class NoteDoodlePreviewPlugin extends Plugin {
     }
   }
 
-  async readDoodles(file) {
-    const path = this.doodlePathForFile(file);
+  async readDrawings(file) {
+    const path = this.drawingPathForFile(file);
+    const legacyPath = this.legacyDrawingPathForFile(file);
     const adapter = this.app.vault.adapter;
 
-    if (!(await adapter.exists(path))) {
-      return createEmptyDoodleData(file);
-    }
-
     try {
-      return normalizeDoodleData(JSON.parse(await adapter.read(path)), file);
+      if (await adapter.exists(path)) {
+        return normalizeDrawingData(JSON.parse(await adapter.read(path)), file);
+      }
+
+      if (await adapter.exists(legacyPath)) {
+        const migrated = normalizeDrawingData(JSON.parse(await adapter.read(legacyPath)), file);
+        await this.writeDrawings(file, migrated);
+        return migrated;
+      }
+
+      return createEmptyDrawingData(file);
     } catch (error) {
-      console.error(`[${PLUGIN_ID}] Failed to read doodle file`, error);
-      return createEmptyDoodleData(file);
+      console.error(`[${PLUGIN_ID}] Failed to read drawing file`, error);
+      return createEmptyDrawingData(file);
     }
   }
 
-  scheduleDoodleSave(file, data) {
-    const path = this.doodlePathForFile(file);
+  scheduleDrawingSave(file, data) {
+    const path = this.drawingPathForFile(file);
     const previous = this.saveTimers.get(path);
 
     if (previous) {
@@ -430,20 +538,20 @@ module.exports = class NoteDoodlePreviewPlugin extends Plugin {
 
     const timer = setTimeout(() => {
       this.saveTimers.delete(path);
-      compactDoodleData(data);
-      this.writeDoodles(file, data).catch((error) => {
-        console.error(`[${PLUGIN_ID}] Failed to save doodle file`, error);
-        new Notice("Failed to save doodle data.");
+      compactDrawingData(data);
+      this.writeDrawings(file, data).catch((error) => {
+        console.error(`[${PLUGIN_ID}] Failed to save drawing file`, error);
+        new Notice("Failed to save drawing data.");
       });
     }, 500);
 
     this.saveTimers.set(path, timer);
   }
 
-  async writeDoodles(file, data) {
-    await this.ensureDoodleDir();
+  async writeDrawings(file, data) {
+    await this.ensureDrawingDir();
 
-    const path = this.doodlePathForFile(file);
+    const path = this.drawingPathForFile(file);
     const body = JSON.stringify({
       ...data,
       sourcePath: file.path,
@@ -528,7 +636,7 @@ module.exports = class NoteDoodlePreviewPlugin extends Plugin {
       window.clearTimeout(state.timer);
     }
 
-    element.addClass("note-doodle-saving");
+    element.addClass("notedraw-saving");
     state.timer = window.setTimeout(() => {
       state.timer = null;
       this.flushTextSave(element);
@@ -560,7 +668,7 @@ module.exports = class NoteDoodlePreviewPlugin extends Plugin {
       state.timer = null;
     }
 
-    element.addClass("note-doodle-saving");
+    element.addClass("notedraw-saving");
     this.flushTextSave(element);
   }
 
@@ -604,7 +712,7 @@ module.exports = class NoteDoodlePreviewPlugin extends Plugin {
     const latestText = state.latestText;
 
     if (normalizeRenderedText(baselineText) === normalizeRenderedText(latestText)) {
-      element.removeClass("note-doodle-saving");
+      element.removeClass("notedraw-saving");
       return;
     }
 
@@ -629,8 +737,8 @@ module.exports = class NoteDoodlePreviewPlugin extends Plugin {
         state.target = result.target || state.target;
         state.warningLogged = false;
         state.saveBlocked = false;
-        element.dataset.noteDoodleOriginal = latestText;
-        element.removeClass("note-doodle-save-failed");
+        element.dataset.noteDrawOriginal = latestText;
+        element.removeClass("notedraw-save-failed");
 
         if (!state.saveLogged) {
           this.appendDebugLog({
@@ -644,7 +752,7 @@ module.exports = class NoteDoodlePreviewPlugin extends Plugin {
           state.saveLogged = true;
         }
       } else {
-        element.addClass("note-doodle-save-failed");
+        element.addClass("notedraw-save-failed");
         state.saveBlocked = true;
         if (!state.warningLogged) {
           console.warn(`[${PLUGIN_ID}] Could not find the original block to update`, {
@@ -666,7 +774,7 @@ module.exports = class NoteDoodlePreviewPlugin extends Plugin {
       }
     } catch (error) {
       console.error(`[${PLUGIN_ID}] Failed to save text block`, error);
-      element.addClass("note-doodle-save-failed");
+      element.addClass("notedraw-save-failed");
       this.appendDebugLog({
         event: "save-error",
         file: state.file?.path,
@@ -680,7 +788,7 @@ module.exports = class NoteDoodlePreviewPlugin extends Plugin {
 
     if (state.pending || normalizeRenderedText(state.baselineText) !== normalizeRenderedText(state.latestText)) {
       if (state.saveBlocked) {
-        element.removeClass("note-doodle-saving");
+        element.removeClass("notedraw-saving");
         return;
       }
 
@@ -692,7 +800,7 @@ module.exports = class NoteDoodlePreviewPlugin extends Plugin {
       return;
     }
 
-    element.removeClass("note-doodle-saving");
+    element.removeClass("notedraw-saving");
   }
 
   async saveTextBlock(file, originalText, editedText, sourceInfo, target) {
@@ -729,7 +837,7 @@ module.exports = class NoteDoodlePreviewPlugin extends Plugin {
   }
 };
 
-class PreviewDoodleController {
+class PreviewDrawingController {
   constructor(plugin, previewEl, view, file, options = {}) {
     this.plugin = plugin;
     this.previewEl = previewEl;
@@ -738,7 +846,7 @@ class PreviewDoodleController {
     this.allowTextEdit = options.allowTextEdit !== false;
     this.surfaceType = options.surfaceType || "preview";
     this.active = false;
-    this.doodleData = {
+    this.drawingData = {
       version: 1,
       sourcePath: file.path,
       strokes: [],
@@ -761,6 +869,7 @@ class PreviewDoodleController {
         count: 1,
       },
     };
+    this.applySettings();
     this.penColor = this.brushSettings[BRUSH_PEN].color;
     this.penWidth = this.brushSettings[BRUSH_PEN].width;
     this.penOpacity = this.brushSettings[BRUSH_PEN].opacity;
@@ -795,7 +904,7 @@ class PreviewDoodleController {
     this.redoStack = [];
     this.selectedStrokeIndex = -1;
     this.selectedStrokeIndexes = new Set();
-    this.doodlesVisible = true;
+    this.drawingsVisible = true;
     this.buttonLongPressed = false;
     this.buttonLongPressTimer = null;
     this.paletteOpen = false;
@@ -809,6 +918,8 @@ class PreviewDoodleController {
     this.staticCacheDirty = true;
     this.scrollEventTarget = null;
     this.layoutMeasureEl = null;
+    this.drawingsLoaded = false;
+    this.loadingDrawings = null;
 
     this.onPointerDown = this.onPointerDown.bind(this);
     this.onPointerMove = this.onPointerMove.bind(this);
@@ -823,14 +934,14 @@ class PreviewDoodleController {
   }
 
   async mount() {
-    cleanupDoodleUi(this.previewEl);
-    this.previewEl._noteDoodleController = this;
-    this.previewEl.addClass("note-doodle-shell");
-    this.previewEl.toggleClass("is-note-doodle-source-shell", this.surfaceType === "source");
+    cleanupDrawingUi(this.previewEl);
+    this.previewEl._noteDrawController = this;
+    this.previewEl.addClass("notedraw-shell");
+    this.previewEl.toggleClass("is-notedraw-source-shell", this.surfaceType === "source");
 
     this.button = this.createHeaderButton();
 
-    this.toolbar = this.previewEl.createDiv({ cls: "note-doodle-toolbar" });
+    this.toolbar = this.previewEl.createDiv({ cls: "notedraw-toolbar" });
     this.penButton = this.toolbar.createEl("button", {
       attr: { type: "button", title: "Pen" },
     });
@@ -844,25 +955,25 @@ class PreviewDoodleController {
     this.watercolorButton.addEventListener("click", () => this.setBrushMode(BRUSH_WATERCOLOR));
 
     this.selectButton = this.toolbar.createEl("button", {
-      attr: { type: "button", title: "Select doodles" },
+      attr: { type: "button", title: "Select drawings" },
     });
     setIcon(this.selectButton, "mouse-pointer-2");
     this.selectButton.addEventListener("click", () => this.toggleSelectMode());
 
     this.undoButton = this.toolbar.createEl("button", {
-      attr: { type: "button", title: "Undo last doodle" },
+      attr: { type: "button", title: "Undo last drawing" },
     });
     setIcon(this.undoButton, "undo-2");
     this.undoButton.addEventListener("click", () => this.undoLastStroke());
 
     this.redoButton = this.toolbar.createEl("button", {
-      attr: { type: "button", title: "Redo doodle" },
+      attr: { type: "button", title: "Redo drawing" },
     });
     setIcon(this.redoButton, "redo-2");
     this.redoButton.addEventListener("click", () => this.redoLastStroke());
 
     this.deleteButton = this.toolbar.createEl("button", {
-      attr: { type: "button", title: "Delete selected doodle" },
+      attr: { type: "button", title: "Delete selected drawing" },
     });
     setIcon(this.deleteButton, "trash-2");
     this.deleteButton.addEventListener("click", () => this.deleteSelectedStroke());
@@ -874,10 +985,14 @@ class PreviewDoodleController {
     this.paletteButton.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
+      if (this.toolMode === TOOL_SELECT) {
+        this.setPaletteOpen(false);
+        return;
+      }
       this.togglePalettePanel();
     });
 
-    this.palettePanel = this.previewEl.createDiv({ cls: "note-doodle-palette-panel" });
+    this.palettePanel = this.previewEl.createDiv({ cls: "notedraw-palette-panel" });
     this.colorInput = this.createPaletteInput("palette", "color", {
       type: "color",
       value: this.penColor,
@@ -914,7 +1029,7 @@ class PreviewDoodleController {
       this.syncCurrentBrushFields();
     });
 
-    this.canvas = this.previewEl.createEl("canvas", { cls: "note-doodle-canvas" });
+    this.canvas = this.previewEl.createEl("canvas", { cls: "notedraw-canvas" });
     this.canvas.addEventListener("pointerdown", this.onPointerDown);
     this.canvas.addEventListener("pointermove", this.onPointerMove);
     this.canvas.addEventListener("pointerup", this.onPointerUp);
@@ -934,20 +1049,34 @@ class PreviewDoodleController {
     this.scrollEventTarget = getScrollEventTarget(findScrollableAncestor(this.previewEl));
     this.scrollEventTarget?.addEventListener("scroll", this.onScroll, { passive: true });
 
-    this.doodleData = await this.plugin.readDoodles(this.file);
     this.updateToolButtons();
     this.syncPaletteInputs();
-    this.resizeCanvas();
-    this.render();
-    this.scheduleLayoutRefresh();
+  }
+
+  applySettings() {
+    const settings = sanitizeSettings(this.plugin?.settings || {});
+    if (this.brushSettings?.[BRUSH_PEN]) {
+      this.brushSettings[BRUSH_PEN].color = settings.defaultPenColor;
+      this.brushSettings[BRUSH_PEN].width = settings.defaultPenWidth;
+      this.brushSettings[BRUSH_PEN].opacity = settings.defaultPenOpacity;
+    }
+    if (this.brushSettings?.[BRUSH_WATERCOLOR]) {
+      this.brushSettings[BRUSH_WATERCOLOR].color = settings.defaultWatercolorColor;
+      this.brushSettings[BRUSH_WATERCOLOR].width = settings.defaultWatercolorWidth;
+      this.brushSettings[BRUSH_WATERCOLOR].opacity = settings.defaultWatercolorOpacity;
+    }
+    this.syncCurrentBrushFields?.();
+    this.syncPaletteInputs?.();
+    this.positionToolbar?.();
+    this.render?.();
   }
 
   createPaletteInput(icon, cls, attr) {
-    const row = this.palettePanel.createDiv({ cls: "note-doodle-palette-row" });
-    const iconEl = row.createSpan({ cls: "note-doodle-palette-icon" });
+    const row = this.palettePanel.createDiv({ cls: "notedraw-palette-row" });
+    const iconEl = row.createSpan({ cls: "notedraw-palette-icon" });
     setIcon(iconEl, icon);
     return row.createEl("input", {
-      cls: `note-doodle-${cls}`,
+      cls: `notedraw-${cls}`,
       attr,
     });
   }
@@ -989,9 +1118,14 @@ class PreviewDoodleController {
     this.selectedStrokeIndex = -1;
     this.selectedStrokeIndexes.clear();
     this.invalidateStaticCache();
-    this.doodleData = await this.plugin.readDoodles(file);
-    this.resizeCanvas();
-    this.render();
+    this.drawingsLoaded = false;
+    this.loadingDrawings = null;
+    this.drawingData = createEmptyDrawingData(file);
+    if (this.active) {
+      await this.ensureDrawingsLoaded();
+      this.resizeCanvas();
+      this.render();
+    }
   }
 
   destroy() {
@@ -1010,22 +1144,22 @@ class PreviewDoodleController {
     this.toolbar?.remove();
     this.palettePanel?.remove();
     this.canvas?.remove();
-    this.previewEl.removeClass("note-doodle-shell");
-    this.previewEl.removeClass("is-doodle-active");
-    this.previewEl.removeClass("is-doodle-hidden");
+    this.previewEl.removeClass("notedraw-shell");
+    this.previewEl.removeClass("is-drawing-active");
+    this.previewEl.removeClass("is-drawing-hidden");
     this.previewEl.removeClass("is-select-mode");
     this.previewEl.removeClass("is-palette-open");
     this.previewEl.removeClass("is-watercolor-mode");
-    this.previewEl.removeClass("is-note-doodle-source-shell");
+    this.previewEl.removeClass("is-notedraw-source-shell");
     this.previewEl.removeClass("is-resizing-selection");
-    if (this.previewEl._noteDoodleController === this) {
-      delete this.previewEl._noteDoodleController;
+    if (this.previewEl._noteDrawController === this) {
+      delete this.previewEl._noteDrawController;
     }
   }
 
-  toggle() {
+  async toggle() {
     this.active = !this.active;
-    this.previewEl.toggleClass("is-doodle-active", this.active);
+    this.previewEl.toggleClass("is-drawing-active", this.active);
     this.button?.classList.toggle("is-active", this.active);
 
     if (!this.active) {
@@ -1035,8 +1169,36 @@ class PreviewDoodleController {
       this.cancelSelectionDrag(true);
       this.cancelSelectedStrokeDrag(true);
     } else {
+      this.ensureDrawingsLoaded().catch((error) => {
+        console.error(`[${PLUGIN_ID}] Failed to load drawings`, error);
+      });
       this.scheduleLayoutRefresh();
     }
+  }
+
+  async ensureDrawingsLoaded() {
+    if (this.drawingsLoaded) {
+      return;
+    }
+
+    if (this.loadingDrawings) {
+      await this.loadingDrawings;
+      return;
+    }
+
+    this.loadingDrawings = this.plugin.readDrawings(this.file)
+      .then((data) => {
+        this.drawingData = data;
+        this.drawingsLoaded = true;
+        this.invalidateStaticCache();
+        this.resizeCanvas();
+        this.render();
+      })
+      .finally(() => {
+        this.loadingDrawings = null;
+      });
+
+    await this.loadingDrawings;
   }
 
   onResize() {
@@ -1121,11 +1283,12 @@ class PreviewDoodleController {
     const right = clamp(window.innerWidth - anchorRight + 10, 8, Math.max(8, window.innerWidth - 48));
     const minTop = Math.max(56, hostRect.top + 48);
     const maxTop = Math.max(minTop, window.innerHeight - toolbarHeight - 8);
-    const top = clamp(anchorBottom + 10, minTop, maxTop);
+    const topOffset = sanitizeSettings(this.plugin?.settings || {}).toolbarTopOffset;
+    const top = clamp(anchorBottom + topOffset, minTop, maxTop);
 
-    this.previewEl.style.setProperty("--note-doodle-toolbar-right", `${Math.round(right)}px`);
-    this.previewEl.style.setProperty("--note-doodle-toolbar-top", `${Math.round(top)}px`);
-    this.previewEl.style.setProperty("--note-doodle-palette-top", `${Math.round(top + 42)}px`);
+    this.previewEl.style.setProperty("--notedraw-toolbar-right", `${Math.round(right)}px`);
+    this.previewEl.style.setProperty("--notedraw-toolbar-top", `${Math.round(top)}px`);
+    this.previewEl.style.setProperty("--notedraw-palette-top", `${Math.round(top + 42)}px`);
   }
 
   setBrushMode(mode) {
@@ -1179,12 +1342,16 @@ class PreviewDoodleController {
     this.penButton?.classList.toggle("is-active", this.toolMode === TOOL_DRAW && this.brushMode === BRUSH_PEN);
     this.watercolorButton?.classList.toggle("is-active", this.toolMode === TOOL_DRAW && this.brushMode === BRUSH_WATERCOLOR);
     this.selectButton?.classList.toggle("is-active", this.toolMode === TOOL_SELECT);
+    this.paletteButton?.toggleAttribute("disabled", this.toolMode === TOOL_SELECT);
     this.previewEl.toggleClass("is-watercolor-mode", this.toolMode === TOOL_DRAW && this.brushMode === BRUSH_WATERCOLOR);
   }
 
   toggleSelectMode() {
     this.toolMode = this.toolMode === TOOL_SELECT ? TOOL_DRAW : TOOL_SELECT;
     this.previewEl.toggleClass("is-select-mode", this.toolMode === TOOL_SELECT);
+    if (this.toolMode === TOOL_SELECT) {
+      this.setPaletteOpen(false);
+    }
     this.updateToolButtons();
     this.endTextEdit();
     this.cancelCurrentStroke();
@@ -1193,6 +1360,10 @@ class PreviewDoodleController {
   }
 
   togglePalettePanel() {
+    if (this.toolMode === TOOL_SELECT) {
+      this.setPaletteOpen(false);
+      return;
+    }
     this.setPaletteOpen(!this.paletteOpen);
   }
 
@@ -1222,7 +1393,7 @@ class PreviewDoodleController {
     this.clearButtonLongPress();
     this.buttonLongPressTimer = window.setTimeout(() => {
       this.buttonLongPressed = true;
-      this.toggleDoodlesVisible();
+      this.toggleDrawingsVisible();
     }, LONG_PRESS_MS);
   }
 
@@ -1238,7 +1409,9 @@ class PreviewDoodleController {
       return;
     }
 
-    this.toggle();
+    this.toggle().catch((error) => {
+      console.error(`[${PLUGIN_ID}] Failed to toggle NoteDraw`, error);
+    });
   }
 
   clearButtonLongPress() {
@@ -1248,12 +1421,12 @@ class PreviewDoodleController {
     }
   }
 
-  toggleDoodlesVisible() {
-    this.doodlesVisible = !this.doodlesVisible;
-    this.previewEl.toggleClass("is-doodle-hidden", !this.doodlesVisible);
+  toggleDrawingsVisible() {
+    this.drawingsVisible = !this.drawingsVisible;
+    this.previewEl.toggleClass("is-drawing-hidden", !this.drawingsVisible);
     this.button?.setAttribute(
       "title",
-      this.doodlesVisible ? "Edit text / draw" : "Edit text / draw (doodles hidden)",
+      this.drawingsVisible ? "Edit text / draw" : "Edit text / draw (drawings hidden)",
     );
   }
 
@@ -1486,11 +1659,11 @@ class PreviewDoodleController {
         this.setSelectedStrokes(this.findStrokeAt(point));
       }
     } else {
-      this.doodleData.strokes.push(this.currentStroke);
+      this.drawingData.strokes.push(this.currentStroke);
       this.clearSelectedStrokes();
       this.redoStack = [];
       this.invalidateStaticCache();
-      this.plugin.scheduleDoodleSave(this.file, this.doodleData);
+      this.plugin.scheduleDrawingSave(this.file, this.drawingData);
       this.currentStroke = null;
     }
 
@@ -1669,7 +1842,7 @@ class PreviewDoodleController {
     this.dragStrokeStartPoint = point;
     this.dragStrokeOriginalPoints = new Map(indexes.map((index) => [
       index,
-      this.doodleData.strokes[index].points.map((strokePoint) => ({ ...strokePoint })),
+      this.drawingData.strokes[index].points.map((strokePoint) => ({ ...strokePoint })),
     ]));
     this.dragStrokeMoved = false;
     this.dragStrokeHitIndex = hitIndex;
@@ -1714,7 +1887,7 @@ class PreviewDoodleController {
     }
 
     for (const [index, points] of this.dragStrokeOriginalPoints.entries()) {
-      const stroke = this.doodleData.strokes[index];
+      const stroke = this.drawingData.strokes[index];
       if (!stroke) {
         continue;
       }
@@ -1734,7 +1907,7 @@ class PreviewDoodleController {
   finishSelectedStrokeDrag(event) {
     if (this.dragStrokeMoved) {
       this.redoStack = [];
-      this.plugin.scheduleDoodleSave(this.file, this.doodleData);
+      this.plugin.scheduleDrawingSave(this.file, this.drawingData);
     } else if (this.getSelectedStrokeIndexes().length > 1 && this.dragStrokeHitIndex >= 0) {
       this.setSelectedStrokes(this.dragStrokeHitIndex);
     } else {
@@ -1751,7 +1924,7 @@ class PreviewDoodleController {
   cancelSelectedStrokeDrag(restoreOriginal = false) {
     if (restoreOriginal && this.dragStrokeOriginalPoints?.size) {
       for (const [index, points] of this.dragStrokeOriginalPoints.entries()) {
-        const stroke = this.doodleData.strokes[index];
+        const stroke = this.drawingData.strokes[index];
         if (stroke) {
           stroke.points = points.map((strokePoint) => ({ ...strokePoint }));
         }
@@ -1794,8 +1967,8 @@ class PreviewDoodleController {
     this.resizeSelectionOriginalStrokes = new Map(indexes.map((index) => [
       index,
       {
-        width: this.doodleData.strokes[index].width || this.penWidth,
-        points: this.doodleData.strokes[index].points.map((strokePoint) => ({ ...strokePoint })),
+        width: this.drawingData.strokes[index].width || this.penWidth,
+        points: this.drawingData.strokes[index].points.map((strokePoint) => ({ ...strokePoint })),
       },
     ]));
     this.resizeSelectionMoved = false;
@@ -1868,7 +2041,7 @@ class PreviewDoodleController {
     shiftNormalizedStrokesInsideCanvas(nextByIndex);
 
     for (const [index, next] of nextByIndex.entries()) {
-      const stroke = this.doodleData.strokes[index];
+      const stroke = this.drawingData.strokes[index];
       if (!stroke) {
         continue;
       }
@@ -1884,7 +2057,7 @@ class PreviewDoodleController {
   finishSelectedStrokeResize(event) {
     if (this.resizeSelectionMoved) {
       this.redoStack = [];
-      this.plugin.scheduleDoodleSave(this.file, this.doodleData);
+      this.plugin.scheduleDrawingSave(this.file, this.drawingData);
     } else {
       this.cancelSelectedStrokeResize(true);
     }
@@ -1899,7 +2072,7 @@ class PreviewDoodleController {
   cancelSelectedStrokeResize(restoreOriginal = false) {
     if (restoreOriginal && this.resizeSelectionOriginalStrokes?.size) {
       for (const [index, original] of this.resizeSelectionOriginalStrokes.entries()) {
-        const stroke = this.doodleData.strokes[index];
+        const stroke = this.drawingData.strokes[index];
         if (stroke) {
           stroke.width = original.width;
           stroke.points = original.points.map((strokePoint) => ({ ...strokePoint }));
@@ -1964,11 +2137,11 @@ class PreviewDoodleController {
     const from = points[points.length - 1];
     const distance = pointDistanceOnCanvas(from, point, this.canvasWidth(), this.canvasHeight());
 
-    if (distance <= DOODLE_MIN_POINT_DISTANCE_PX) {
+    if (distance <= DRAWING_MIN_POINT_DISTANCE_PX) {
       return;
     }
 
-    const steps = Math.max(1, Math.ceil(distance / DOODLE_INTERPOLATION_STEP_PX));
+    const steps = Math.max(1, Math.ceil(distance / DRAWING_INTERPOLATION_STEP_PX));
 
     for (let index = 1; index <= steps; index += 1) {
       const ratio = index / steps;
@@ -2038,7 +2211,7 @@ class PreviewDoodleController {
       this.ctx.drawImage(this.staticCanvas, 0, 0, this.canvasWidth(), this.canvasHeight());
     }
 
-    for (const [index, stroke] of this.doodleData.strokes.entries()) {
+    for (const [index, stroke] of this.drawingData.strokes.entries()) {
       if (this.isStrokeSelected(index)) {
         this.drawStroke(stroke, SELECTED_STROKE_ALPHA);
       }
@@ -2061,7 +2234,7 @@ class PreviewDoodleController {
     }
 
     this.staticCtx.clearRect(0, 0, this.canvasWidth(), this.canvasHeight());
-    for (const [index, stroke] of this.doodleData.strokes.entries()) {
+    for (const [index, stroke] of this.drawingData.strokes.entries()) {
       if (!this.isStrokeSelected(index)) {
         this.drawStrokeOn(this.staticCtx, stroke);
       }
@@ -2231,8 +2404,8 @@ class PreviewDoodleController {
     const width = this.canvasWidth();
     const height = this.canvasHeight();
 
-    for (let index = this.doodleData.strokes.length - 1; index >= 0; index -= 1) {
-      const stroke = this.doodleData.strokes[index];
+    for (let index = this.drawingData.strokes.length - 1; index >= 0; index -= 1) {
+      const stroke = this.drawingData.strokes[index];
       const threshold = Math.max(SELECT_STROKE_PADDING, (stroke.width || this.penWidth) / 2 + SELECT_STROKE_PADDING);
 
       if (strokeHitTest(stroke, hitPoint, width, height, threshold)) {
@@ -2249,8 +2422,8 @@ class PreviewDoodleController {
     const rect = normalizeCanvasRect(start, end);
     const indexes = [];
 
-    for (let index = 0; index < this.doodleData.strokes.length; index += 1) {
-      const stroke = this.doodleData.strokes[index];
+    for (let index = 0; index < this.drawingData.strokes.length; index += 1) {
+      const stroke = this.drawingData.strokes[index];
       const bounds = getStrokeBounds(stroke, this.canvasWidth(), this.canvasHeight());
       if (bounds && rectsIntersect(rect, bounds)) {
         indexes.push(index);
@@ -2265,7 +2438,7 @@ class PreviewDoodleController {
     this.selectedStrokeIndexes = new Set(
       normalized
         .map((index) => Number(index))
-        .filter((index) => Number.isInteger(index) && index >= 0 && index < this.doodleData.strokes.length),
+        .filter((index) => Number.isInteger(index) && index >= 0 && index < this.drawingData.strokes.length),
     );
     const selected = this.getSelectedStrokeIndexes();
     this.selectedStrokeIndex = selected.length ? selected[selected.length - 1] : -1;
@@ -2281,11 +2454,11 @@ class PreviewDoodleController {
   getSelectedStrokeIndexes() {
     if (this.selectedStrokeIndexes.size) {
       return Array.from(this.selectedStrokeIndexes)
-        .filter((index) => index >= 0 && index < this.doodleData.strokes.length)
+        .filter((index) => index >= 0 && index < this.drawingData.strokes.length)
         .sort((a, b) => a - b);
     }
 
-    if (this.selectedStrokeIndex >= 0 && this.selectedStrokeIndex < this.doodleData.strokes.length) {
+    if (this.selectedStrokeIndex >= 0 && this.selectedStrokeIndex < this.drawingData.strokes.length) {
       return [this.selectedStrokeIndex];
     }
 
@@ -2302,7 +2475,7 @@ class PreviewDoodleController {
     let result = null;
 
     for (const index of indexes) {
-      const bounds = getStrokeBounds(this.doodleData.strokes[index], this.canvasWidth(), this.canvasHeight());
+      const bounds = getStrokeBounds(this.drawingData.strokes[index], this.canvasWidth(), this.canvasHeight());
       if (!bounds) {
         continue;
       }
@@ -2338,7 +2511,7 @@ class PreviewDoodleController {
 
   getSelectedStrokeMaxWidth() {
     return this.getSelectedStrokeIndexes()
-      .map((index) => this.doodleData.strokes[index]?.width || this.penWidth)
+      .map((index) => this.drawingData.strokes[index]?.width || this.penWidth)
       .reduce((max, width) => Math.max(max, width), this.penWidth);
   }
 
@@ -2394,17 +2567,19 @@ class PreviewDoodleController {
 
   startTextEdit(element, clientPoint = null) {
     if (this.currentEditor === element) {
+      element.focus();
+      placeCaretInEditable(element, clientPoint);
       return;
     }
 
     this.endTextEdit();
 
     this.currentEditor = element;
-    element.dataset.noteDoodleOriginal = element.innerText;
+    element.dataset.noteDrawOriginal = element.innerText;
     this.plugin.prepareTextEditState(this.file, element.innerText, element);
     element.contentEditable = "true";
     element.spellcheck = true;
-    element.addClass("note-doodle-editing");
+    element.addClass("notedraw-editing");
     element.focus();
 
     placeCaretInEditable(element, clientPoint);
@@ -2412,7 +2587,7 @@ class PreviewDoodleController {
     const onInput = () => {
       this.plugin.scheduleTextSave(
         this.file,
-        element.dataset.noteDoodleOriginal || "",
+        element.dataset.noteDrawOriginal || "",
         element.innerText,
         element,
       );
@@ -2430,7 +2605,7 @@ class PreviewDoodleController {
 
     const onBlur = () => this.endTextEdit();
 
-    element._noteDoodleCleanup = () => {
+    element._noteDrawCleanup = () => {
       element.removeEventListener("input", onInput);
       element.removeEventListener("keydown", onKeyDown);
       element.removeEventListener("blur", onBlur);
@@ -2474,30 +2649,30 @@ class PreviewDoodleController {
       return;
     }
 
-    const original = element.dataset.noteDoodleOriginal || "";
+    const original = element.dataset.noteDrawOriginal || "";
     const edited = element.innerText;
 
     if (normalizeRenderedText(original) !== normalizeRenderedText(edited)) {
       this.plugin.scheduleTextSaveNow(this.file, original, edited, element);
     }
 
-    element._noteDoodleCleanup?.();
-    delete element._noteDoodleCleanup;
-    delete element.dataset.noteDoodleOriginal;
+    element._noteDrawCleanup?.();
+    delete element._noteDrawCleanup;
+    delete element.dataset.noteDrawOriginal;
     element.contentEditable = "false";
-    element.removeClass("note-doodle-editing");
+    element.removeClass("notedraw-editing");
     this.currentEditor = null;
   }
 
   undoLastStroke() {
-    if (!this.doodleData.strokes.length) {
+    if (!this.drawingData.strokes.length) {
       return;
     }
 
-    const removed = this.doodleData.strokes.pop();
+    const removed = this.drawingData.strokes.pop();
     this.redoStack.push(removed);
     this.clearSelectedStrokes();
-    this.plugin.scheduleDoodleSave(this.file, this.doodleData);
+    this.plugin.scheduleDrawingSave(this.file, this.drawingData);
     this.render();
   }
 
@@ -2507,9 +2682,9 @@ class PreviewDoodleController {
     }
 
     const restored = this.redoStack.pop();
-    this.doodleData.strokes.push(restored);
-    this.setSelectedStrokes(this.doodleData.strokes.length - 1);
-    this.plugin.scheduleDoodleSave(this.file, this.doodleData);
+    this.drawingData.strokes.push(restored);
+    this.setSelectedStrokes(this.drawingData.strokes.length - 1);
+    this.plugin.scheduleDrawingSave(this.file, this.drawingData);
     this.render();
   }
 
@@ -2520,16 +2695,16 @@ class PreviewDoodleController {
     }
 
     for (const index of indexes.slice().sort((a, b) => b - a)) {
-      this.doodleData.strokes.splice(index, 1);
+      this.drawingData.strokes.splice(index, 1);
     }
     this.clearSelectedStrokes();
     this.redoStack = [];
-    this.plugin.scheduleDoodleSave(this.file, this.doodleData);
+    this.plugin.scheduleDrawingSave(this.file, this.drawingData);
     this.render();
   }
 }
 
-class NoteDoodlePreviewSettingTab extends PluginSettingTab {
+class NoteDrawSettingTab extends PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
@@ -2538,10 +2713,107 @@ class NoteDoodlePreviewSettingTab extends PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h2", { text: "Note Doodle Preview" });
+    containerEl.createEl("h2", { text: "NoteDraw" });
 
-    const codesContainer = containerEl.createDiv({ cls: "note-doodle-settings-codes" });
+    this.renderSettings();
+
+    const codesContainer = containerEl.createDiv({ cls: "notedraw-settings-codes" });
     this.renderExtraCodes(codesContainer);
+  }
+
+  renderSettings() {
+    const { containerEl } = this;
+    const settings = sanitizeSettings(this.plugin.settings);
+
+    new Setting(containerEl)
+      .setName("Default pen color")
+      .setDesc("Initial color for new pen strokes.")
+      .addColorPicker((component) => component
+        .setValue(settings.defaultPenColor)
+        .onChange(async (value) => {
+          this.plugin.settings.defaultPenColor = value;
+          await this.plugin.saveSettings();
+        }));
+
+    new Setting(containerEl)
+      .setName("Default pen width")
+      .setDesc("Initial pen width.")
+      .addSlider((component) => component
+        .setLimits(MIN_BRUSH_WIDTH, MAX_BRUSH_WIDTH, 0.5)
+        .setValue(settings.defaultPenWidth)
+        .setDynamicTooltip()
+        .onChange(async (value) => {
+          this.plugin.settings.defaultPenWidth = value;
+          await this.plugin.saveSettings();
+        }));
+
+    new Setting(containerEl)
+      .setName("Default pen opacity")
+      .setDesc("Initial pen opacity.")
+      .addSlider((component) => component
+        .setLimits(0, 1, 0.02)
+        .setValue(settings.defaultPenOpacity)
+        .setDynamicTooltip()
+        .onChange(async (value) => {
+          this.plugin.settings.defaultPenOpacity = value;
+          await this.plugin.saveSettings();
+        }));
+
+    new Setting(containerEl)
+      .setName("Default watercolor color")
+      .setDesc("Initial color for watercolor strokes.")
+      .addColorPicker((component) => component
+        .setValue(settings.defaultWatercolorColor)
+        .onChange(async (value) => {
+          this.plugin.settings.defaultWatercolorColor = value;
+          await this.plugin.saveSettings();
+        }));
+
+    new Setting(containerEl)
+      .setName("Default watercolor width")
+      .setDesc("Initial watercolor width.")
+      .addSlider((component) => component
+        .setLimits(MIN_BRUSH_WIDTH, MAX_BRUSH_WIDTH, 0.5)
+        .setValue(settings.defaultWatercolorWidth)
+        .setDynamicTooltip()
+        .onChange(async (value) => {
+          this.plugin.settings.defaultWatercolorWidth = value;
+          await this.plugin.saveSettings();
+        }));
+
+    new Setting(containerEl)
+      .setName("Default watercolor opacity")
+      .setDesc("Initial watercolor opacity.")
+      .addSlider((component) => component
+        .setLimits(0, 1, 0.02)
+        .setValue(settings.defaultWatercolorOpacity)
+        .setDynamicTooltip()
+        .onChange(async (value) => {
+          this.plugin.settings.defaultWatercolorOpacity = value;
+          await this.plugin.saveSettings();
+        }));
+
+    new Setting(containerEl)
+      .setName("Toolbar top offset")
+      .setDesc("Extra pixels below the Obsidian header.")
+      .addSlider((component) => component
+        .setLimits(0, 48, 1)
+        .setValue(settings.toolbarTopOffset)
+        .setDynamicTooltip()
+        .onChange(async (value) => {
+          this.plugin.settings.toolbarTopOffset = value;
+          await this.plugin.saveSettings();
+        }));
+
+    new Setting(containerEl)
+      .setName("Debug log")
+      .setDesc("Write text-save diagnostics to the plugin folder only while troubleshooting.")
+      .addToggle((component) => component
+        .setValue(settings.enableDebugLog)
+        .onChange(async (value) => {
+          this.plugin.settings.enableDebugLog = value;
+          await this.plugin.saveSettings();
+        }));
   }
 
   async renderExtraCodes(containerEl) {
@@ -2560,19 +2832,19 @@ class NoteDoodlePreviewSettingTab extends PluginSettingTab {
     }
 
     containerEl.createDiv({
-      cls: "note-doodle-settings-codes-title",
+      cls: "notedraw-settings-codes-title",
       text: "给我买咖啡 / Buy me a coffee",
     });
     containerEl.createDiv({
-      cls: "note-doodle-settings-codes-subtitle",
+      cls: "notedraw-settings-codes-subtitle",
       text: "如果这个插件帮到你，可以扫码打赏支持继续维护 / If this tool helps, tips are appreciated.",
     });
 
-    const gridEl = containerEl.createDiv({ cls: "note-doodle-settings-codes-grid" });
+    const gridEl = containerEl.createDiv({ cls: "notedraw-settings-codes-grid" });
     for (const item of codeItems) {
-      const codeEl = gridEl.createDiv({ cls: "note-doodle-settings-code" });
+      const codeEl = gridEl.createDiv({ cls: "notedraw-settings-code" });
       const imageEl = codeEl.createEl("img", {
-        cls: "note-doodle-settings-code-image",
+        cls: "notedraw-settings-code-image",
         attr: {
           alt: item.label,
           loading: "lazy",
@@ -2581,7 +2853,7 @@ class NoteDoodlePreviewSettingTab extends PluginSettingTab {
       });
       imageEl.src = item.src;
       codeEl.createDiv({
-        cls: "note-doodle-settings-code-label",
+        cls: "notedraw-settings-code-label",
         text: item.label,
       });
     }
@@ -2607,6 +2879,24 @@ function findEditableTarget(target, previewEl) {
   }
 
   return editable;
+}
+
+function sanitizeSettings(settings) {
+  const input = settings || {};
+  return {
+    defaultPenColor: isCssColor(input.defaultPenColor) ? input.defaultPenColor : DEFAULT_SETTINGS.defaultPenColor,
+    defaultPenWidth: clamp(Number(input.defaultPenWidth ?? DEFAULT_SETTINGS.defaultPenWidth), MIN_BRUSH_WIDTH, MAX_BRUSH_WIDTH),
+    defaultPenOpacity: clamp(Number(input.defaultPenOpacity ?? DEFAULT_SETTINGS.defaultPenOpacity), 0, 1),
+    defaultWatercolorColor: isCssColor(input.defaultWatercolorColor) ? input.defaultWatercolorColor : DEFAULT_SETTINGS.defaultWatercolorColor,
+    defaultWatercolorWidth: clamp(Number(input.defaultWatercolorWidth ?? DEFAULT_SETTINGS.defaultWatercolorWidth), MIN_BRUSH_WIDTH, MAX_BRUSH_WIDTH),
+    defaultWatercolorOpacity: clamp(Number(input.defaultWatercolorOpacity ?? DEFAULT_SETTINGS.defaultWatercolorOpacity), 0, 1),
+    toolbarTopOffset: clamp(Number(input.toolbarTopOffset ?? DEFAULT_SETTINGS.toolbarTopOffset), 0, 48),
+    enableDebugLog: Boolean(input.enableDebugLog),
+  };
+}
+
+function isCssColor(value) {
+  return typeof value === "string" && /^#[0-9a-fA-F]{6}$/.test(value);
 }
 
 function isSourceTextTarget(target, previewEl) {
@@ -2642,7 +2932,7 @@ function placeCaretInEditable(element, clientPoint) {
     return;
   }
 
-  const range = rangeFromClientPoint(element, clientPoint) || rangeAtEditableEnd(element);
+  const range = rangeFromClientPoint(element, clientPoint) || nearestTextRangeFromPoint(element, clientPoint) || rangeAtEditableEnd(element);
   if (!range) {
     return;
   }
@@ -2656,21 +2946,28 @@ function rangeFromClientPoint(element, clientPoint) {
     return null;
   }
 
-  const nearestTextRange = nearestTextRangeFromPoint(element, clientPoint);
-  if (nearestTextRange) {
-    return nearestTextRange;
-  }
-
   let range = null;
+  const overlay = element.closest(".notedraw-shell")?.querySelector(".notedraw-canvas");
+  const previousPointerEvents = overlay?.style.pointerEvents;
 
-  if (typeof document.caretRangeFromPoint === "function") {
-    range = document.caretRangeFromPoint(clientPoint.x, clientPoint.y);
-  } else if (typeof document.caretPositionFromPoint === "function") {
-    const position = document.caretPositionFromPoint(clientPoint.x, clientPoint.y);
-    if (position?.offsetNode) {
-      range = document.createRange();
-      range.setStart(position.offsetNode, position.offset);
-      range.collapse(true);
+  try {
+    if (overlay) {
+      overlay.style.pointerEvents = "none";
+    }
+
+    if (typeof document.caretRangeFromPoint === "function") {
+      range = document.caretRangeFromPoint(clientPoint.x, clientPoint.y);
+    } else if (typeof document.caretPositionFromPoint === "function") {
+      const position = document.caretPositionFromPoint(clientPoint.x, clientPoint.y);
+      if (position?.offsetNode) {
+        range = document.createRange();
+        range.setStart(position.offsetNode, position.offset);
+        range.collapse(true);
+      }
+    }
+  } finally {
+    if (overlay) {
+      overlay.style.pointerEvents = previousPointerEvents || "";
     }
   }
 
@@ -2747,9 +3044,11 @@ function scoreRectDistance(rect, point) {
     : point.y > rect.bottom
       ? point.y - rect.bottom
       : 0;
-  const linePenalty = yDistance * 8;
+  const centerY = rect.top + rect.height / 2;
+  const sameLineBonus = point.y >= rect.top - 2 && point.y <= rect.bottom + 2 ? 0 : 100000;
+  const linePenalty = Math.abs(point.y - centerY) * 200;
   const inlinePenalty = xDistance;
-  return linePenalty + inlinePenalty;
+  return sameLineBonus + linePenalty + inlinePenalty;
 }
 
 function rangeAtEditableEnd(element) {
@@ -2873,8 +3172,8 @@ function annotateEditableElements(root, ctx) {
     const dataLine = Number.isFinite(ownDataLine) ? ownDataLine : closestDataLine;
 
     if (Number.isFinite(dataLine)) {
-      element.dataset.noteDoodleDataLine = String(dataLine);
-      element.dataset.noteDoodleDataLineScope = Number.isFinite(ownDataLine) ? "self" : "ancestor";
+      element.dataset.noteDrawDataLine = String(dataLine);
+      element.dataset.noteDrawDataLineScope = Number.isFinite(ownDataLine) ? "self" : "ancestor";
     }
 
     if (!info) {
@@ -2882,15 +3181,15 @@ function annotateEditableElements(root, ctx) {
     }
 
     if (typeof info.text === "string" && info.text.trim()) {
-      element._noteDoodleSourceText = info.text;
+      element._noteDrawSourceText = info.text;
     }
 
     if (Number.isFinite(info.lineStart)) {
-      element.dataset.noteDoodleLineStart = String(info.lineStart);
+      element.dataset.noteDrawLineStart = String(info.lineStart);
     }
 
     if (Number.isFinite(info.lineEnd)) {
-      element.dataset.noteDoodleLineEnd = String(info.lineEnd);
+      element.dataset.noteDrawLineEnd = String(info.lineEnd);
     }
   }
 }
@@ -3008,23 +3307,23 @@ function isEmbeddedPreview(preview) {
   return Boolean(preview.closest(".markdown-embed, .markdown-embed-content, .internal-embed, .external-embed"));
 }
 
-function cleanupAllDoodleHeaderButtons() {
+function cleanupAllDrawingHeaderButtons() {
   document
-    .querySelectorAll(".note-doodle-header-button")
+    .querySelectorAll(".notedraw-header-button")
     .forEach((button) => button.remove());
 }
 
-function cleanupDoodleUi(preview) {
-  preview.querySelectorAll(".note-doodle-button, .note-doodle-fallback-button, .note-doodle-toolbar, .note-doodle-palette-panel, .note-doodle-canvas")
+function cleanupDrawingUi(preview) {
+  preview.querySelectorAll(".notedraw-button, .notedraw-fallback-button, .notedraw-toolbar, .notedraw-palette-panel, .notedraw-canvas")
     .forEach((element) => element.remove());
-  preview.classList.remove("note-doodle-shell", "is-doodle-active", "is-doodle-hidden", "is-select-mode", "is-palette-open", "is-watercolor-mode", "is-selecting-strokes", "is-resizing-selection");
+  preview.classList.remove("notedraw-shell", "is-drawing-active", "is-drawing-hidden", "is-select-mode", "is-palette-open", "is-watercolor-mode", "is-selecting-strokes", "is-resizing-selection");
 }
 
 function normalizeVaultPath(path) {
   return String(path || "").replace(/\\/g, "/").replace(/^\/+/, "").replace(/\/+$/, "");
 }
 
-function createEmptyDoodleData(file) {
+function createEmptyDrawingData(file) {
   return {
     version: 1,
     sourcePath: file.path,
@@ -3033,7 +3332,7 @@ function createEmptyDoodleData(file) {
   };
 }
 
-function normalizeDoodleData(data, file) {
+function normalizeDrawingData(data, file) {
   const strokes = Array.isArray(data?.strokes) ? data.strokes : [];
 
   return {
@@ -3069,7 +3368,7 @@ function normalizeStroke(stroke) {
   };
 }
 
-function compactDoodleData(data) {
+function compactDrawingData(data) {
   if (!Array.isArray(data?.strokes)) {
     return data;
   }
@@ -3093,7 +3392,7 @@ function compactStrokePoints(points) {
     const last = compacted[compacted.length - 1];
     const distance = pointDistanceOnCanvas(last, point, 1, 1) * 1000;
 
-    if (distance >= DOODLE_COMPACT_DISTANCE_PX) {
+    if (distance >= DRAWING_COMPACT_DISTANCE_PX) {
       compacted.push(point);
     }
   }
@@ -3103,11 +3402,11 @@ function compactStrokePoints(points) {
 }
 
 function getSourceInfo(element) {
-  const lineStart = parseInteger(element.dataset.noteDoodleLineStart);
-  const lineEnd = parseInteger(element.dataset.noteDoodleLineEnd);
-  const dataLine = parseInteger(element.dataset.noteDoodleDataLine)
+  const lineStart = parseInteger(element.dataset.noteDrawLineStart);
+  const lineEnd = parseInteger(element.dataset.noteDrawLineEnd);
+  const dataLine = parseInteger(element.dataset.noteDrawDataLine)
     ?? parseDataLine(element.closest("[data-line]")?.getAttribute("data-line"));
-  const dataLineScope = element.dataset.noteDoodleDataLineScope || (
+  const dataLineScope = element.dataset.noteDrawDataLineScope || (
     Number.isFinite(parseDataLine(element.getAttribute("data-line"))) ? "self" : "ancestor"
   );
   const exactDataLine = dataLineScope === "self" ? dataLine : null;
@@ -3119,7 +3418,7 @@ function getSourceInfo(element) {
     lineEnd: resolvedEnd,
     dataLine,
     dataLineScope,
-    sourceText: typeof element._noteDoodleSourceText === "string" ? element._noteDoodleSourceText : null,
+    sourceText: typeof element._noteDrawSourceText === "string" ? element._noteDrawSourceText : null,
   };
 }
 
@@ -3958,3 +4257,4 @@ function formatReplacementBlock(originalBlock, editedText) {
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
+

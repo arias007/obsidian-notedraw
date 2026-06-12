@@ -1,57 +1,160 @@
-# Note Doodle Preview
+# NoteDraw
 
-Obsidian prototype plugin for editing rendered text and drawing directly in reading preview.
+NoteDraw is an Obsidian plugin for editing rendered note text and drawing directly on notes.
 
-## What it does
+It is built as a note-surface layer: the same drawing and text-edit logic can be reused on Obsidian reading view, source view, and future Obsidian web surfaces.
 
-- Adds a magic-wand button to the Obsidian view header beside the official view controls.
-- Click the button to enter preview edit/doodle mode.
-- Tap rendered text blocks to edit them in place.
-- Text edits are saved back to the current Markdown file with a short debounce.
-- Drag in preview space, including over text, to draw a continuous doodle stroke.
-- Tap an existing doodle stroke to select it; selected strokes render semi-transparent and can be deleted.
-- Drag inside the selected stroke frame to move that doodle instead of drawing a new stroke.
-- Two-finger scroll still scrolls the note while doodle mode is active.
-- Doodles are stored under this plugin folder:
+## Features
 
-```text
-.obsidian/plugins/note-doodle-preview/doodles/
-```
+- Magic-wand header button for entering NoteDraw mode.
+- In-place text editing in reading view.
+- Source/edit view overlay using the same command entry.
+- Pen and watercolor brushes with separate default color, width, and opacity.
+- Stroke selection, multi-select, movement, resize handles, and delete.
+- Circular toolbar buttons sized for quick touch or mouse use.
+- Palette button is disabled while select mode is active.
+- Lazy drawing-data loading to reduce note-open lag.
+- Click-to-caret behavior inside active text blocks.
+- Drawing data stored outside Markdown so notes stay clean.
+- Public API for scripts, other plugins, and AI agents.
 
-## Prototype limits
+## Storage
 
-- Text editing is intentionally conservative. It supports common rendered blocks such as headings, paragraphs, list items, blockquotes, table cells, and callout content.
-- It skips code blocks, embeds, images, links, canvases, and plugin UI.
-- Text replacement uses the rendered block text and searches for the closest matching Markdown source block. This is good for a prototype, but a production plugin should use stronger source-position mapping.
-- Doodle coordinates are stored as normalized page coordinates so they can roughly scale with the preview container.
-- Doodle drawing is an overlay. It does not become part of the Markdown body.
-- Version 0.1.6 smooths doodle strokes by using coalesced pointer samples, inserting intermediate points, and treating tap-on-text as edit while drag-on-text remains drawing.
-- Version 0.1.7 makes selected doodles semi-transparent and forwards two-finger scrolling to the preview.
-- Version 0.1.8 makes drags from the selected frame move the selected doodle instead of creating a new stroke.
-- Version 0.1.9 moves the mode button into the Obsidian view header and changes it to a magic-wand icon.
-- Version 0.1.12 keeps the 0.1.9 drawing path and prevents duplicate magic-wand buttons when multiple notes or embedded previews render.
-- Version 0.1.13 shows the header button only in reading view, refreshes the canvas after layout settles, moves the toolbar under the header button, enlarges toolbar icons, adds multi-select mode, and replaces the inline color control with a palette panel for color, width, opacity, and pen count.
-- Version 0.1.14 adds separate pen and watercolor brush buttons with isolated palette settings, enlarges toolbar icons without changing button size, and lets a tap inside a multi-selection frame switch back to a single selected stroke.
-- Version 0.1.15 keeps the toolbar right-aligned under the header action and enlarges toolbar icons again while keeping the button boxes at the same size.
-- Version 0.1.17 keeps the 0.1.15 toolbar/icon baseline and restores the 0.1.12 magic-wand display/binding logic to avoid the header action disappearing.
-- Version 0.1.18 keeps the toolbar right-aligned, reduces toolbar icons to 26px, places the text-edit caret near the tap position, and adds a source/edit view doodle overlay behind the same magic-wand action.
-- Version 0.1.19 adds corner handles for resizing selected doodles, anchors the toolbar to the right side of the current note view when the magic-wand header position is unstable, and throttles drawing redraws to reduce lag on large doodle files.
-- Version 0.1.20 pins the toolbar to the current note view's right edge, softens toolbar icon strokes, makes the watercolor active state clearer, and changes watercolor rendering to centered translucent layers instead of offset multi-pen strokes.
-- Version 0.1.21 keeps one stable magic-wand header button per note view across reading/source switches, adds a static doodle render cache for smoother drawing, and restyles the toolbar as a lighter Obsidian-style icon strip.
-- Version 0.1.22 adds the same two packaged support QR codes used by the user's other plugins to the plugin settings page.
-- Version 0.1.23 keeps the toolbar below the Obsidian header while scrolling, refreshes canvas sizing after layout settles, lets native wheel scrolling pass through, simplifies watercolor to an even translucent stroke, removes the pen-count slider, expands width and opacity ranges, and clears selection when tapping outside the frame.
-- Version 0.1.24 improves text targeting: reading preview caret placement uses the nearest rendered text character instead of falling back to the line end, and source/edit view taps while doodle mode is active are forwarded to CodeMirror so text can be entered at the tapped position.
-
-## Manual install
-
-Copy this folder to:
+New drawing files are stored here:
 
 ```text
-<your-vault>/.obsidian/plugins/note-doodle-preview/
+<vault>/.obsidian/plugins/notedraw/drawings/
 ```
 
-Then enable it in Obsidian:
+Each note gets a JSON file derived from its vault path. NoteDraw keeps drawing data separate from Markdown text, so Markdown sync and normal editing remain predictable.
+
+## Migration
+
+Version `0.2.0` is the full NoteDraw rename and uses plugin id:
 
 ```text
-Settings -> Community plugins -> Installed plugins -> Note Doodle Preview
+notedraw
 ```
+
+If an older local prototype folder exists, NoteDraw can read its previous drawing JSON files and copy them into the new `notedraw/drawings` folder on first access. The old files are not deleted.
+
+## Manual Install
+
+Copy these files into:
+
+```text
+<vault>/.obsidian/plugins/notedraw/
+```
+
+Required files:
+
+```text
+main.js
+manifest.json
+styles.css
+README.md
+extras/
+```
+
+Then enable:
+
+```text
+Settings -> Community plugins -> Installed plugins -> NoteDraw
+```
+
+## Settings
+
+The settings page currently includes:
+
+- Default pen color, width, opacity.
+- Default watercolor color, width, opacity.
+- Toolbar top offset.
+- Debug log toggle for troubleshooting text targeting.
+
+## Extension API
+
+NoteDraw exposes a small API from the plugin instance:
+
+```js
+const api = app.plugins.plugins.notedraw.api;
+```
+
+For convenience, it is also exposed while the plugin is loaded:
+
+```js
+const api = window.NoteDraw;
+```
+
+Current API:
+
+```js
+api.version;
+api.getActiveController();
+await api.readDrawings(file);
+await api.writeDrawings(file, drawingData);
+api.getStoragePaths(file);
+await api.replaceSelectionText(file, originalText, editedText);
+await api.insertStroke(file, stroke);
+```
+
+Example: read current note drawings.
+
+```js
+const file = app.workspace.getActiveFile();
+const drawings = await app.plugins.plugins.notedraw.api.readDrawings(file);
+console.log(drawings.strokes.length);
+```
+
+Example: insert a stroke.
+
+```js
+const file = app.workspace.getActiveFile();
+await app.plugins.plugins.notedraw.api.insertStroke(file, {
+  brush: "pen",
+  color: "#e53935",
+  width: 3,
+  opacity: 1,
+  points: [
+    { x: 0.2, y: 0.2 },
+    { x: 0.5, y: 0.35 },
+    { x: 0.7, y: 0.6 }
+  ]
+});
+```
+
+Example: AI-assisted text replacement.
+
+```js
+const file = app.workspace.getActiveFile();
+await app.plugins.plugins.notedraw.api.replaceSelectionText(
+  file,
+  "old rendered text",
+  "edited Markdown text"
+);
+```
+
+## AI Editing
+
+The API is intentionally plain JSON and string based so local AI agents can:
+
+- Read drawing layers.
+- Insert generated marks, highlights, or review strokes.
+- Replace selected or matched text.
+- Build higher-level commands such as summarize, rewrite, annotate, or highlight.
+
+For safety, AI tools should read first, prepare a small patch, then write only the target note or drawing file.
+
+## Web Surface Direction
+
+NoteDraw is structured around controllers bound to visible note surfaces. That makes future support practical for:
+
+- Obsidian reading view.
+- Obsidian source/edit view.
+- Obsidian Publish or web-like rendered note pages.
+- External AI or browser automation that talks through the public API.
+
+The current package focuses on the local Obsidian plugin runtime. The API and DOM controller split are the extension points for broader web support.
+
+## Version
+
+Current version: `0.2.0`.
