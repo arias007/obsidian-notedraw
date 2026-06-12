@@ -214,9 +214,9 @@
   left: auto;
   right: var(--notedraw-toolbar-right, 8px);
   display: none;
-  width: 252px;
+  width: 216px;
   max-width: calc(100vw - 16px);
-  padding: 9px;
+  padding: 7px;
   border: 1px solid var(--background-modifier-border);
   border-radius: 8px;
   background: var(--background-primary);
@@ -225,35 +225,37 @@
 
 .notedraw-shell.is-drawing-active.is-text-panel-open .notedraw-text-panel {
   display: grid;
-  gap: 9px;
+  gap: 7px;
 }
 
 .notedraw-text-panel-section {
   display: grid;
-  gap: 6px;
+  gap: 4px;
 }
 
 .notedraw-text-panel-title {
   color: var(--text-muted);
   font-size: var(--font-ui-smaller);
   font-weight: 600;
+  line-height: 1.1;
 }
 
 .notedraw-text-panel-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 6px;
+  grid-template-columns: repeat(4, 24px);
+  gap: 5px;
 }
 
 .notedraw-text-panel-button {
-  height: 30px;
-  min-width: 0;
+  width: 24px;
+  height: 24px;
+  min-width: 24px;
   padding: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   border: 1px solid var(--background-modifier-border);
-  border-radius: 7px;
+  border-radius: 6px;
   color: var(--text-muted);
   background: var(--background-secondary);
   cursor: pointer;
@@ -272,8 +274,8 @@
 
 .notedraw-text-panel-button svg,
 .notedraw-text-panel-button .svg-icon {
-  width: 17px;
-  height: 17px;
+  width: 15px;
+  height: 15px;
 }
 
 .notedraw-palette-row {

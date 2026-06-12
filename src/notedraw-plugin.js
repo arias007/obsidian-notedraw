@@ -1397,12 +1397,28 @@ class PreviewDrawingController {
     }
 
     this.textStyle[name] = !this.textStyle[name];
+    this.applyStyleToCurrentMarkdownEditor(name);
     if (this.toolMode !== TOOL_TEXT) {
       this.toolMode = TOOL_TEXT;
     }
     this.previewEl.removeClass("is-select-mode");
     this.updateToolButtons();
     this.syncTextPanelButtons();
+  }
+
+  applyStyleToCurrentMarkdownEditor(name) {
+    if (!this.currentEditor?.isConnected || !["bold", "italic", "underline"].includes(name)) {
+      return;
+    }
+
+    this.currentEditor.focus();
+    const command = name === "bold" ? "bold" : name === "italic" ? "italic" : "underline";
+    try {
+      document.execCommand(command, false, null);
+      this.currentEditor.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "formatSetBlockText" }));
+    } catch (_) {
+      // Rich editing commands are best-effort in rendered Markdown blocks.
+    }
   }
 
   toggleTextPanel() {
@@ -1412,6 +1428,8 @@ class PreviewDrawingController {
     this.textPanelOpen = !this.textPanelOpen;
     if (this.textPanelOpen) {
       this.setPaletteOpen(false);
+      this.toolMode = TOOL_TEXT;
+      this.previewEl.removeClass("is-select-mode");
       this.updateFloatingControlsPosition();
       this.syncTextPanelButtons();
     }
@@ -1504,19 +1522,17 @@ class PreviewDrawingController {
 
   createTextToolPanel() {
     this.textPanel.empty();
-    this.createTextPanelSection("Insert", [
+    this.createTextPanelSection("Content", [
       { label: "Text", icon: "type", action: () => this.chooseTextPreset({}) },
       { label: "Title", icon: "heading", action: () => this.chooseTextPreset({ text: "Title", fontSize: 24, bold: true, boxed: false }) },
       { label: "Code", icon: "code-2", action: () => this.chooseTextPreset({ text: "code", fontSize: 16, boxed: true, code: true }) },
       { label: "File", icon: "paperclip", action: () => this.chooseTextPreset({ text: "File", fontSize: 16, boxed: true, file: true }) },
     ]);
-    this.createTextPanelSection("Style", [
+    this.createTextPanelSection("Style / Shape", [
       { id: "bold", label: "Bold", text: "B", className: "notedraw-style-button", action: () => this.toggleTextStyle("bold") },
       { id: "italic", label: "Italic", text: "I", className: "notedraw-style-button notedraw-style-italic", action: () => this.toggleTextStyle("italic") },
       { id: "underline", label: "Underline", text: "U", className: "notedraw-style-button notedraw-style-underline", action: () => this.toggleTextStyle("underline") },
       { id: "boxed", label: "Button box", icon: "badge", action: () => this.toggleTextStyle("boxed") },
-    ]);
-    this.createTextPanelSection("Shapes", [
       { id: TOOL_RECT, label: "Box", icon: "square", action: () => this.chooseShapeTool(TOOL_RECT) },
       { id: TOOL_LINE, label: "Line", icon: "minus", action: () => this.chooseShapeTool(TOOL_LINE) },
       { id: TOOL_ARROW, label: "Arrow", icon: "arrow-up-right", action: () => this.chooseShapeTool(TOOL_ARROW) },
@@ -1785,6 +1801,12 @@ class PreviewDrawingController {
 
     if (hitStrokeIndex >= 0 && !this.selectedStrokeFrameContains(point)) {
       if (this.isStrokeSelected(hitStrokeIndex)) {
+        if (isTextStroke(this.drawingData.strokes[hitStrokeIndex]) && event.detail >= 2) {
+          this.editTextStroke(hitStrokeIndex);
+          event.preventDefault();
+          event.stopPropagation();
+          return;
+        }
         this.startSelectedStrokeDrag(event, point, hitStrokeIndex);
       } else {
         this.setSelectedStrokes(hitStrokeIndex);
@@ -1796,6 +1818,12 @@ class PreviewDrawingController {
     }
 
     if (this.selectedStrokeFrameContains(point)) {
+      if (hitStrokeIndex >= 0 && isTextStroke(this.drawingData.strokes[hitStrokeIndex]) && event.detail >= 2) {
+        this.editTextStroke(hitStrokeIndex);
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
       this.startSelectedStrokeDrag(event, point, hitStrokeIndex);
       return;
     }
@@ -2263,8 +2291,8 @@ class PreviewDrawingController {
       this.plugin.scheduleDrawingSave(this.file, this.drawingData);
     } else if (this.getSelectedStrokeIndexes().length > 1 && this.dragStrokeHitIndex >= 0) {
       this.setSelectedStrokes(this.dragStrokeHitIndex);
-    } else {
-      this.cancelSelectedStrokeDrag(true);
+    } else if (this.dragStrokeHitIndex >= 0) {
+      this.setSelectedStrokes(this.dragStrokeHitIndex);
     }
 
     this.releasePointerCapture(event.pointerId);
@@ -2301,6 +2329,25 @@ class PreviewDrawingController {
     this.pointerStartClient = null;
     this.activePointerId = null;
     this.previewEl.removeClass("is-moving-selection");
+  }
+
+  editTextStroke(index) {
+    const stroke = this.drawingData.strokes[index];
+    if (!isTextStroke(stroke)) {
+      return;
+    }
+
+    const text = window.prompt("Text", stroke.text || "");
+    if (text === null) {
+      return;
+    }
+
+    stroke.text = text.trim() || "Text";
+    this.setSelectedStrokes(index);
+    this.redoStack = [];
+    this.invalidateStaticCache();
+    this.plugin.scheduleDrawingSave(this.file, this.drawingData);
+    this.render();
   }
 
   startSelectedStrokeResize(event, point, handle) {
@@ -4554,6 +4601,10 @@ function rectsIntersect(a, b) {
 
 function isStructuredStroke(stroke) {
   return [TOOL_TEXT, TOOL_RECT, TOOL_LINE, TOOL_ARROW].includes(stroke?.kind);
+}
+
+function isTextStroke(stroke) {
+  return stroke?.kind === TOOL_TEXT;
 }
 
 function estimateTextWidth(text, fontSize, bold = false) {

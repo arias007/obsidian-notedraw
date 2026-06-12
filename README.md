@@ -15,6 +15,7 @@ It is built as a note-surface layer: the same drawing and text-edit logic can be
 - Text style toggles for bold, italic, underline, and boxed text.
 - Text, title, code, file, style, and shape tools are grouped under the Text panel instead of being spread across the main toolbar.
 - Text and shape tools can select existing drawing elements before creating new ones.
+- Text elements can be double-clicked to edit again, and text-panel style buttons apply to active rendered Markdown text when possible.
 - Circular toolbar buttons sized for quick touch or mouse use.
 - Palette button is disabled while select mode is active.
 - Active pen and watercolor buttons use their current brush color as the button background.
@@ -190,4 +191,4 @@ The current package focuses on the local Obsidian plugin runtime. The API and DO
 
 ## Version
 
-Current version: `0.2.7`.
+Current version: `0.2.8`.
