@@ -1547,6 +1547,17 @@ var require_notedraw_plugin = __commonJS({
             return;
           }
         }
+        if (hitStrokeIndex >= 0 && !this.selectedStrokeFrameContains(point)) {
+          if (this.isStrokeSelected(hitStrokeIndex)) {
+            this.startSelectedStrokeDrag(event, point, hitStrokeIndex);
+          } else {
+            this.setSelectedStrokes(hitStrokeIndex);
+            this.render();
+            event.preventDefault();
+            event.stopPropagation();
+          }
+          return;
+        }
         if (this.selectedStrokeFrameContains(point)) {
           this.startSelectedStrokeDrag(event, point, hitStrokeIndex);
           return;
