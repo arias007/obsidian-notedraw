@@ -3013,7 +3013,7 @@ var NoteDrawSettingTab = class extends import_obsidian.PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    new import_obsidian.Setting(containerEl).setName("NoteDraw").setHeading();
+    new import_obsidian.Setting(containerEl).setName("Defaults").setHeading();
     this.renderSettings();
     const codesContainer = containerEl.createDiv({ cls: "notedraw-settings-codes" });
     this.renderExtraCodes(codesContainer);

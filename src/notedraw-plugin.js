@@ -3521,7 +3521,7 @@ class NoteDrawSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
     new Setting(containerEl)
-      .setName("NoteDraw")
+      .setName("Defaults")
       .setHeading();
 
     this.renderSettings();
