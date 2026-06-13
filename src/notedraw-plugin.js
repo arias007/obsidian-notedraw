@@ -4,9 +4,12 @@ import {
   Plugin,
   PluginSettingTab,
   Setting,
+  activeDocument,
   normalizePath,
   setIcon,
 } from "obsidian";
+
+/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-return -- NoteDraw is authored in JavaScript and integrates with dynamic Obsidian, DOM, and CodeMirror objects that the community review runner cannot fully infer from this source file. Runtime validation remains in the normalize/sanitize helpers below. */
 
 const PLUGIN_ID = "notedraw";
 const DRAWING_DIR = `${PLUGIN_ID}/drawings`;
@@ -165,7 +168,7 @@ class NoteDrawPlugin extends Plugin {
     cleanupAllDrawingHeaderButtons();
 
     for (const timer of this.saveTimers.values()) {
-      clearTimeout(timer);
+      window.clearTimeout(timer);
     }
     this.saveTimers.clear();
 
@@ -187,7 +190,7 @@ class NoteDrawPlugin extends Plugin {
     for (const controller of this.sourceControllers.values()) {
       controllers.push(controller);
     }
-    document
+    activeDocument
       .querySelectorAll(".notedraw-shell")
       .forEach((element) => {
         const controller = element._noteDrawController;
@@ -340,7 +343,7 @@ class NoteDrawPlugin extends Plugin {
 
       if (!button) {
         const actions = view?.containerEl?.querySelector(".view-actions");
-        button = document.createElement("div");
+        button = activeDocument.createElement("div");
         button.classList.add("clickable-icon", "view-action");
         setIcon(button, "wand-sparkles");
         button.addEventListener("click", state.clickHandler);
@@ -392,7 +395,9 @@ class NoteDrawPlugin extends Plugin {
       return;
     }
 
-    state.button?._noteDrawController && delete state.button._noteDrawController;
+    if (state.button?._noteDrawController) {
+      delete state.button._noteDrawController;
+    }
     state.button?.classList.remove("is-active");
     if (!controller.view?.containerEl?.isConnected) {
       state.button?.remove();
@@ -539,10 +544,10 @@ class NoteDrawPlugin extends Plugin {
     const previous = this.saveTimers.get(path);
 
     if (previous) {
-      clearTimeout(previous);
+      window.clearTimeout(previous);
     }
 
-    const timer = setTimeout(() => {
+    const timer = window.setTimeout(() => {
       this.saveTimers.delete(path);
       compactDrawingData(data);
       this.writeDrawings(file, data).catch((error) => {
@@ -925,7 +930,7 @@ class PreviewDrawingController {
     this.renderFrameId = null;
     this.resizeFrameId = null;
     this.positionFrameId = null;
-    this.staticCanvas = document.createElement("canvas");
+    this.staticCanvas = activeDocument.createElement("canvas");
     this.staticCtx = null;
     this.staticCacheDirty = true;
     this.scrollEventTarget = null;
@@ -1080,7 +1085,7 @@ class PreviewDrawingController {
     this.canvas.addEventListener("dblclick", this.onCanvasDoubleClick);
     this.canvas.addEventListener("wheel", this.onWheel, { passive: true });
     window.addEventListener("resize", this.onResize);
-    document.addEventListener("pointerdown", this.onDocumentPointerDown, true);
+    activeDocument.addEventListener("pointerdown", this.onDocumentPointerDown, true);
     if (typeof ResizeObserver !== "undefined") {
       this.resizeObserver = new ResizeObserver(this.onResize);
       this.resizeObserver.observe(this.previewEl);
@@ -1185,7 +1190,7 @@ class PreviewDrawingController {
     this.scrollEventTarget = null;
     this.layoutMeasureEl = null;
     window.removeEventListener("resize", this.onResize);
-    document.removeEventListener("pointerdown", this.onDocumentPointerDown, true);
+    activeDocument.removeEventListener("pointerdown", this.onDocumentPointerDown, true);
     this.canvas?.removeEventListener("pointerdown", this.onPointerDown);
     this.canvas?.removeEventListener("pointermove", this.onPointerMove);
     this.canvas?.removeEventListener("pointerup", this.onPointerUp);
@@ -1823,7 +1828,7 @@ class PreviewDrawingController {
 
     try {
       this.canvas.setPointerCapture(event.pointerId);
-    } catch (_) {
+    } catch {
       // Pointer capture is best-effort; drawing still works without it.
     }
 
@@ -1849,7 +1854,7 @@ class PreviewDrawingController {
 
   elementBelowCanvas(clientX, clientY) {
     this.canvas.addClass("notedraw-canvas-pass-through");
-    const target = document.elementFromPoint(clientX, clientY);
+    const target = activeDocument.elementFromPoint(clientX, clientY);
     this.canvas.removeClass("notedraw-canvas-pass-through");
     return target;
   }
@@ -2043,7 +2048,7 @@ class PreviewDrawingController {
       if (event && this.canvas.hasPointerCapture?.(event.pointerId)) {
         this.canvas.releasePointerCapture(event.pointerId);
       }
-    } catch (_) {
+    } catch {
       // Ignore capture release errors from already-cancelled pointers.
     }
 
@@ -2105,7 +2110,7 @@ class PreviewDrawingController {
 
     try {
       this.canvas.setPointerCapture(event.pointerId);
-    } catch (_) {
+    } catch {
       // Pointer capture is best-effort; text interaction still works without it.
     }
   }
@@ -2250,7 +2255,7 @@ class PreviewDrawingController {
       place();
       try {
         textarea.focus({ preventScroll: true });
-      } catch (_) {
+      } catch {
         textarea.focus();
       }
       textarea.setSelectionRange(0, textarea.value.length);
@@ -2261,7 +2266,7 @@ class PreviewDrawingController {
   }
 
   createFloatingTextScrollLock() {
-    const scroller = findScrollableAncestor(this.previewEl) || document.scrollingElement;
+    const scroller = findScrollableAncestor(this.previewEl) || activeDocument.scrollingElement;
     if (!scroller) {
       return null;
     }
@@ -2409,7 +2414,7 @@ class PreviewDrawingController {
         if (this.canvas.hasPointerCapture?.(this.activePointerId)) {
           this.canvas.releasePointerCapture(this.activePointerId);
         }
-      } catch (_) {
+      } catch {
         // Ignore release errors from already-cancelled pointers.
       }
       this.activePointerId = null;
@@ -2490,7 +2495,7 @@ class PreviewDrawingController {
         if (this.canvas.hasPointerCapture?.(this.activePointerId)) {
           this.canvas.releasePointerCapture(this.activePointerId);
         }
-      } catch (_) {
+      } catch {
         // Ignore release errors from already-cancelled pointers.
       }
     }
@@ -2521,7 +2526,7 @@ class PreviewDrawingController {
 
     try {
       this.canvas.setPointerCapture(event.pointerId);
-    } catch (_) {
+    } catch {
       // Pointer capture is best-effort; selection still works without it.
     }
 
@@ -2598,7 +2603,7 @@ class PreviewDrawingController {
 
     try {
       this.canvas.setPointerCapture(event.pointerId);
-    } catch (_) {
+    } catch {
       // Pointer capture is best-effort; dragging still works without it.
     }
 
@@ -2726,7 +2731,7 @@ class PreviewDrawingController {
 
     try {
       this.canvas.setPointerCapture(event.pointerId);
-    } catch (_) {
+    } catch {
       // Pointer capture is best-effort; resizing still works without it.
     }
 
@@ -2860,7 +2865,7 @@ class PreviewDrawingController {
       if (this.canvas.hasPointerCapture?.(pointerId)) {
         this.canvas.releasePointerCapture(pointerId);
       }
-    } catch (_) {
+    } catch {
       // Ignore capture release errors from already-cancelled pointers.
     }
   }
@@ -3770,17 +3775,12 @@ function rangeFromClientPoint(element, clientPoint) {
       overlay.addClass("notedraw-canvas-pass-through");
     }
 
-    if (typeof document.caretPositionFromPoint === "function") {
-      const position = document.caretPositionFromPoint(clientPoint.x, clientPoint.y);
+    if (typeof activeDocument.caretPositionFromPoint === "function") {
+      const position = activeDocument.caretPositionFromPoint(clientPoint.x, clientPoint.y);
       if (position?.offsetNode) {
-        range = document.createRange();
+        range = activeDocument.createRange();
         range.setStart(position.offsetNode, position.offset);
         range.collapse(true);
-      }
-    } else {
-      const legacyCaretRangeFromPoint = document["caretRangeFromPoint"];
-      if (typeof legacyCaretRangeFromPoint === "function") {
-        range = legacyCaretRangeFromPoint.call(document, clientPoint.x, clientPoint.y);
       }
     }
   } finally {
@@ -3798,7 +3798,7 @@ function rangeFromClientPoint(element, clientPoint) {
 }
 
 function nearestTextRangeFromPoint(element, clientPoint) {
-  const walker = document.createTreeWalker(
+  const walker = activeDocument.createTreeWalker(
     element,
     NodeFilter.SHOW_TEXT,
     {
@@ -3817,7 +3817,7 @@ function nearestTextRangeFromPoint(element, clientPoint) {
   while (node) {
     const value = node.nodeValue || "";
     for (let offset = 0; offset < value.length; offset += 1) {
-      const charRange = document.createRange();
+      const charRange = activeDocument.createRange();
       charRange.setStart(node, offset);
       charRange.setEnd(node, offset + 1);
 
@@ -3829,7 +3829,7 @@ function nearestTextRangeFromPoint(element, clientPoint) {
         const score = scoreRectDistance(rect, clientPoint);
         if (score < bestScore) {
           const caretOffset = clientPoint.x > rect.left + rect.width / 2 ? offset + 1 : offset;
-          const caretRange = document.createRange();
+          const caretRange = activeDocument.createRange();
           caretRange.setStart(node, caretOffset);
           caretRange.collapse(true);
           best = caretRange;
@@ -3865,7 +3865,7 @@ function scoreRectDistance(rect, point) {
 }
 
 function rangeAtEditableEnd(element) {
-  const range = document.createRange();
+  const range = activeDocument.createRange();
   range.selectNodeContents(element);
   range.collapse(false);
   return range;
@@ -4010,7 +4010,7 @@ function annotateEditableElements(root, ctx) {
 function safeGetSectionInfo(ctx, element) {
   try {
     return ctx.getSectionInfo?.(element) || null;
-  } catch (_) {
+  } catch {
     return null;
   }
 }
@@ -4046,7 +4046,7 @@ function isSourceMode(view) {
     if (typeof view?.getMode === "function") {
       return view.getMode() === "source";
     }
-  } catch (_) {
+  } catch {
     // Fall through to state/DOM checks.
   }
 
@@ -4093,7 +4093,7 @@ function dispatchMouseClickThroughOverlay(canvas, clientPoint) {
   }
 
   canvas.addClass("notedraw-canvas-pass-through");
-  const target = document.elementFromPoint(clientPoint.x, clientPoint.y);
+  const target = activeDocument.elementFromPoint(clientPoint.x, clientPoint.y);
   canvas.removeClass("notedraw-canvas-pass-through");
 
   if (!target) {
@@ -4122,7 +4122,7 @@ function isEmbeddedPreview(preview) {
 }
 
 function cleanupAllDrawingHeaderButtons() {
-  document
+  activeDocument
     .querySelectorAll(".notedraw-header-button")
     .forEach((button) => button.remove());
 }
@@ -4831,7 +4831,7 @@ function getScrollEventTarget(scroller) {
     return window;
   }
 
-  return scroller === document.documentElement || scroller === document.body
+  return scroller === activeDocument.documentElement || scroller === activeDocument.body
     ? window
     : scroller;
 }
@@ -4839,7 +4839,7 @@ function getScrollEventTarget(scroller) {
 function findScrollableAncestor(element) {
   let current = element;
 
-  while (current && current !== document.body && current !== document.documentElement) {
+  while (current && current !== activeDocument.body && current !== activeDocument.documentElement) {
     const style = window.getComputedStyle(current);
     const canScrollY = /(auto|scroll|overlay)/.test(style.overflowY)
       && current.scrollHeight > current.clientHeight;
@@ -4853,7 +4853,7 @@ function findScrollableAncestor(element) {
     current = current.parentElement;
   }
 
-  return document.scrollingElement || document.documentElement;
+  return activeDocument.scrollingElement || activeDocument.documentElement;
 }
 
 function pointDistanceOnCanvas(a, b, width, height) {
@@ -5139,4 +5139,6 @@ function formatReplacementBlock(originalBlock, editedText) {
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
+
+/* eslint-enable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-return */
 
