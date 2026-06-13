@@ -33,26 +33,14 @@ const DEFAULT_PEN_OPACITY = 1;
 const TOOL_DRAW = "draw";
 const TOOL_SELECT = "select";
 const TOOL_TEXT = "text";
-const TOOL_RECT = "rect";
-const TOOL_LINE = "line";
-const TOOL_ARROW = "arrow";
 const BRUSH_PEN = "pen";
 const BRUSH_WATERCOLOR = "watercolor";
 const COMMON_COLORS = [
   "#e53935",
-  "#fb8c00",
   "#fdd835",
   "#43a047",
-  "#00acc1",
   "#1e88e5",
-  "#5e35b1",
-  "#8e24aa",
-  "#ec407a",
-  "#6d4c41",
-  "#546e7a",
   "#111827",
-  "#ffffff",
-  "#9e9e9e",
 ];
 const SETTINGS_EXTRA_CODE_ASSETS = [
   { path: "extras/code-1.jpg", label: "给我买咖啡 / Buy me a coffee" },
@@ -134,20 +122,12 @@ class NoteDrawPlugin extends Plugin {
 
     this.registerMarkdownPostProcessor((el, ctx) => {
       const preview = el.closest(".markdown-preview-view");
-      if (!preview) {
+      if (!preview || isEmbeddedPreview(preview)) {
         return;
       }
 
-      const view = findOwningMarkdownView(this.app, preview);
-      if (!view || !view.file) {
-        return;
-      }
-
-      const embedded = isEmbeddedPreview(preview);
-      const targetFile = embedded && ctx.sourcePath
-        ? this.app.vault.getAbstractFileByPath(ctx.sourcePath) || view.file
-        : view.file;
-      if (!targetFile) {
+      const view = findOwningMarkdownView(this.app, preview, ctx.sourcePath);
+      if (!view || !view.file || !ctx.sourcePath || view.file.path !== ctx.sourcePath) {
         return;
       }
 
@@ -155,7 +135,7 @@ class NoteDrawPlugin extends Plugin {
 
       const existingController = this.controllers.get(preview) || preview._noteDrawController;
       if (existingController?.plugin === this) {
-        existingController.setFile(targetFile).catch((error) => {
+        existingController.setFile(view.file).catch((error) => {
           console.error(`[${PLUGIN_ID}] Failed to switch preview controller file`, error);
         });
         return;
@@ -167,9 +147,7 @@ class NoteDrawPlugin extends Plugin {
 
       cleanupDrawingUi(preview);
 
-      const controller = new PreviewDrawingController(this, preview, view, targetFile, {
-        allowTextEdit: !embedded,
-      });
+      const controller = new PreviewDrawingController(this, preview, view, view.file);
       this.controllers.set(preview, controller);
       controller.mount();
       this.register(() => controller.destroy());
@@ -222,22 +200,15 @@ class NoteDrawPlugin extends Plugin {
     return controllers;
   }
 
-  findControllerForView(view) {
-    return this.getAllControllers()
-      .find((controller) => controller.view === view && controller.previewEl?.isConnected)
-      || null;
-  }
-
   createPublicApi() {
     return {
-      version: "0.2.9",
+      version: "0.2.0",
       getActiveController: () => {
         const view = this.app.workspace.getActiveViewOfType(MarkdownView);
         if (!view) {
           return null;
         }
-        const state = this.headerActions.get(view);
-        return state ? this.resolveHeaderController(view, state) : this.findControllerForView(view);
+        return this.resolveHeaderController(view, this.headerActions.get(view) || {});
       },
       readDrawings: async (file) => this.readDrawings(file),
       writeDrawings: async (file, data) => this.writeDrawings(file, normalizeDrawingData(data, file)),
@@ -912,18 +883,14 @@ class PreviewDrawingController {
     this.penOpacity = this.brushSettings[BRUSH_PEN].opacity;
     this.penCount = this.brushSettings[BRUSH_PEN].count;
     this.toolMode = TOOL_DRAW;
-    this.textStyle = {
-      bold: false,
-      italic: false,
-      underline: false,
-      boxed: true,
-    };
     this.pointerDown = false;
     this.startedOnText = false;
     this.pointerStartPoint = null;
     this.pointerStartClient = null;
+    this.pointerLastClient = null;
     this.pointerStartEditable = null;
     this.pointerStartSourceText = false;
+    this.pointerStartTextStrokeIndex = -1;
     this.activePointerId = null;
     this.touchPointers = new Map();
     this.multiTouchScrolling = false;
@@ -952,6 +919,9 @@ class PreviewDrawingController {
     this.buttonLongPressTimer = null;
     this.paletteOpen = false;
     this.textPanelOpen = false;
+    this.textPreset = "plain";
+    this.lastTextTap = null;
+    this.pendingFloatingTextEdit = null;
     this.canvasCssWidth = 1;
     this.canvasCssHeight = 1;
     this.renderFrameId = null;
@@ -968,6 +938,7 @@ class PreviewDrawingController {
     this.onPointerDown = this.onPointerDown.bind(this);
     this.onPointerMove = this.onPointerMove.bind(this);
     this.onPointerUp = this.onPointerUp.bind(this);
+    this.onCanvasDoubleClick = this.onCanvasDoubleClick.bind(this);
     this.onWheel = this.onWheel.bind(this);
     this.onResize = this.onResize.bind(this);
     this.onScroll = this.onScroll.bind(this);
@@ -986,6 +957,12 @@ class PreviewDrawingController {
     this.button = this.createHeaderButton();
 
     this.toolbar = this.previewEl.createDiv({ cls: "notedraw-toolbar" });
+    this.selectButton = this.toolbar.createEl("button", {
+      attr: { type: "button", title: "Select drawings" },
+    });
+    setIcon(this.selectButton, "mouse-pointer-2");
+    this.selectButton.addEventListener("click", () => this.toggleSelectMode());
+
     this.penButton = this.toolbar.createEl("button", {
       attr: { type: "button", title: "Pen" },
     });
@@ -998,21 +975,20 @@ class PreviewDrawingController {
     setIcon(this.watercolorButton, "paintbrush");
     this.watercolorButton.addEventListener("click", () => this.setBrushMode(BRUSH_WATERCOLOR));
 
-    this.textButton = this.toolbar.createEl("button", {
-      attr: { type: "button", title: "Text and shapes" },
-    });
-    setIcon(this.textButton, "type");
-    this.textButton.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      this.toggleTextPanel();
-    });
-
-    this.selectButton = this.toolbar.createEl("button", {
-      attr: { type: "button", title: "Select drawings" },
-    });
-    setIcon(this.selectButton, "mouse-pointer-2");
-    this.selectButton.addEventListener("click", () => this.toggleSelectMode());
+    if (this.surfaceType !== "source") {
+      this.textButton = this.toolbar.createEl("button", {
+        attr: { type: "button", title: "Floating text" },
+      });
+      setIcon(this.textButton, "type");
+      this.textButton.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        this.textPreset = "plain";
+        this.setTextMode();
+        this.setTextPanelOpen(true);
+        this.syncTextPanelButtons();
+      });
+    }
 
     this.undoButton = this.toolbar.createEl("button", {
       attr: { type: "button", title: "Undo last drawing" },
@@ -1048,6 +1024,10 @@ class PreviewDrawingController {
 
     this.palettePanel = this.previewEl.createDiv({ cls: "notedraw-palette-panel" });
     this.createColorPalette();
+    if (this.surfaceType !== "source") {
+      this.textPanel = this.previewEl.createDiv({ cls: "notedraw-text-panel" });
+      this.createTextPanel();
+    }
 
     this.colorInput = this.palettePanel.createEl("input", {
       cls: "notedraw-advanced-color",
@@ -1093,15 +1073,13 @@ class PreviewDrawingController {
       this.updateToolButtons();
     });
 
-    this.textPanel = this.previewEl.createDiv({ cls: "notedraw-text-panel" });
-    this.createTextToolPanel();
-
     this.canvas = this.previewEl.createEl("canvas", { cls: "notedraw-canvas" });
     this.canvas.addEventListener("pointerdown", this.onPointerDown);
     this.canvas.addEventListener("pointermove", this.onPointerMove);
     this.canvas.addEventListener("pointerup", this.onPointerUp);
     this.canvas.addEventListener("pointercancel", this.onPointerUp);
     this.canvas.addEventListener("lostpointercapture", this.onPointerUp);
+    this.canvas.addEventListener("dblclick", this.onCanvasDoubleClick);
     this.canvas.addEventListener("wheel", this.onWheel, { passive: true });
     window.addEventListener("resize", this.onResize);
     document.addEventListener("pointerdown", this.onDocumentPointerDown, true);
@@ -1163,6 +1141,7 @@ class PreviewDrawingController {
     this.currentStroke = null;
     this.pointerDown = false;
     this.pointerStartEditable = null;
+    this.pointerStartTextStrokeIndex = -1;
     this.activePointerId = null;
     this.touchPointers.clear();
     this.multiTouchScrolling = false;
@@ -1198,6 +1177,7 @@ class PreviewDrawingController {
 
   destroy() {
     this.endTextEdit();
+    this.endFloatingTextInput(false);
     this.clearButtonLongPress();
     this.cancelRenderFrame();
     this.cancelResizeFrame();
@@ -1208,6 +1188,13 @@ class PreviewDrawingController {
     this.layoutMeasureEl = null;
     window.removeEventListener("resize", this.onResize);
     document.removeEventListener("pointerdown", this.onDocumentPointerDown, true);
+    this.canvas?.removeEventListener("pointerdown", this.onPointerDown);
+    this.canvas?.removeEventListener("pointermove", this.onPointerMove);
+    this.canvas?.removeEventListener("pointerup", this.onPointerUp);
+    this.canvas?.removeEventListener("pointercancel", this.onPointerUp);
+    this.canvas?.removeEventListener("lostpointercapture", this.onPointerUp);
+    this.canvas?.removeEventListener("dblclick", this.onCanvasDoubleClick);
+    this.canvas?.removeEventListener("wheel", this.onWheel);
     this.plugin.releaseHeaderButton(this);
     this.toolbar?.remove();
     this.palettePanel?.remove();
@@ -1218,6 +1205,7 @@ class PreviewDrawingController {
     this.previewEl.removeClass("is-drawing-hidden");
     this.previewEl.removeClass("is-select-mode");
     this.previewEl.removeClass("is-palette-open");
+    this.previewEl.removeClass("is-text-panel-open");
     this.previewEl.removeClass("is-watercolor-mode");
     this.previewEl.removeClass("is-notedraw-source-shell");
     this.previewEl.removeClass("is-resizing-selection");
@@ -1233,7 +1221,9 @@ class PreviewDrawingController {
 
     if (!this.active) {
       this.endTextEdit();
+      this.endFloatingTextInput(false);
       this.setPaletteOpen(false);
+      this.setTextPanelOpen(false);
       this.cancelCurrentStroke();
       this.cancelSelectionDrag(true);
       this.cancelSelectedStrokeDrag(true);
@@ -1275,6 +1265,7 @@ class PreviewDrawingController {
   }
 
   onScroll() {
+    this.restoreFloatingTextInputScrollLock();
     this.scheduleFloatingControlsPosition();
   }
 
@@ -1383,68 +1374,16 @@ class PreviewDrawingController {
     this.render();
   }
 
-  setShapeToolMode(mode) {
-    if (![TOOL_TEXT, TOOL_RECT, TOOL_LINE, TOOL_ARROW].includes(mode)) {
-      return;
-    }
-
-    this.toolMode = mode;
-    if (mode === TOOL_TEXT) {
-      this.textPanelOpen = false;
-      this.previewEl.removeClass("is-text-panel-open");
-    }
+  setTextMode() {
+    this.toolMode = TOOL_TEXT;
     this.previewEl.removeClass("is-select-mode");
+    this.setPaletteOpen(false);
+    this.setTextPanelOpen(false);
     this.endTextEdit();
     this.cancelCurrentStroke();
     this.cancelSelectionDrag(true);
     this.updateToolButtons();
     this.render();
-  }
-
-  toggleTextStyle(name) {
-    if (!Object.prototype.hasOwnProperty.call(this.textStyle, name)) {
-      return;
-    }
-
-    this.textStyle[name] = !this.textStyle[name];
-    this.applyStyleToCurrentMarkdownEditor(name);
-    if (this.toolMode !== TOOL_TEXT) {
-      this.toolMode = TOOL_TEXT;
-    }
-    this.previewEl.removeClass("is-select-mode");
-    this.updateToolButtons();
-    this.syncTextPanelButtons();
-  }
-
-  applyStyleToCurrentMarkdownEditor(name) {
-    if (!this.currentEditor?.isConnected || !["bold", "italic", "underline"].includes(name)) {
-      return;
-    }
-
-    this.currentEditor.focus();
-    const command = name === "bold" ? "bold" : name === "italic" ? "italic" : "underline";
-    try {
-      document.execCommand(command, false, null);
-      this.currentEditor.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "formatSetBlockText" }));
-    } catch (_) {
-      // Rich editing commands are best-effort in rendered Markdown blocks.
-    }
-  }
-
-  toggleTextPanel() {
-    if (this.toolMode === TOOL_SELECT) {
-      this.previewEl.removeClass("is-select-mode");
-    }
-    this.textPanelOpen = !this.textPanelOpen;
-    if (this.textPanelOpen) {
-      this.setPaletteOpen(false);
-      this.toolMode = TOOL_TEXT;
-      this.previewEl.removeClass("is-select-mode");
-      this.updateFloatingControlsPosition();
-      this.syncTextPanelButtons();
-    }
-    this.previewEl.toggleClass("is-text-panel-open", this.textPanelOpen);
-    this.updateToolButtons();
   }
 
   currentBrushSettings() {
@@ -1483,11 +1422,80 @@ class PreviewDrawingController {
     const watercolorActive = this.toolMode === TOOL_DRAW && this.brushMode === BRUSH_WATERCOLOR;
     this.applyBrushButtonState(this.penButton, this.brushSettings?.[BRUSH_PEN], penActive);
     this.applyBrushButtonState(this.watercolorButton, this.brushSettings?.[BRUSH_WATERCOLOR], watercolorActive);
-    this.textButton?.classList.toggle("is-active", this.textPanelOpen || [TOOL_TEXT, TOOL_RECT, TOOL_LINE, TOOL_ARROW].includes(this.toolMode));
-    this.syncTextPanelButtons();
+    this.textButton?.classList.toggle("is-active", this.toolMode === TOOL_TEXT || this.textPanelOpen);
+    this.textButton?.toggleAttribute("hidden", this.surfaceType === "source");
     this.selectButton?.classList.toggle("is-active", this.toolMode === TOOL_SELECT);
     this.paletteButton?.toggleAttribute("disabled", this.toolMode === TOOL_SELECT);
     this.previewEl.toggleClass("is-watercolor-mode", this.toolMode === TOOL_DRAW && this.brushMode === BRUSH_WATERCOLOR);
+  }
+
+  createTextPanel() {
+    const groups = [
+      {
+        label: "Insert",
+        items: [
+          { id: "plain", label: "Text", icon: "type" },
+          { id: "title", label: "Title", icon: "type" },
+          { id: "code", label: "Code", icon: "code-2" },
+        ],
+      },
+      {
+        label: "Object",
+        items: [
+          { id: "button", label: "Button", icon: "square" },
+          { id: "file", label: "File", icon: "paperclip" },
+        ],
+      },
+    ];
+
+    for (const group of groups) {
+      const groupEl = this.textPanel.createDiv({ cls: "notedraw-text-group" });
+      groupEl.createDiv({ cls: "notedraw-text-group-label", text: group.label });
+      const gridEl = groupEl.createDiv({ cls: "notedraw-text-grid" });
+      for (const item of group.items) {
+        const button = gridEl.createEl("button", {
+          cls: "notedraw-text-option",
+          attr: { type: "button", title: item.label },
+        });
+        button.dataset.noteDrawTextPreset = item.id;
+        setIcon(button, item.icon);
+        button.createSpan({ text: item.label });
+        button.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          this.textPreset = item.id;
+          this.setTextMode();
+          this.syncTextPanelButtons();
+        });
+      }
+    }
+    this.syncTextPanelButtons();
+  }
+
+  syncTextPanelButtons() {
+    this.textPanel
+      ?.querySelectorAll(".notedraw-text-option")
+      .forEach((button) => {
+        button.classList.toggle("is-active", button.dataset.noteDrawTextPreset === this.textPreset);
+      });
+  }
+
+  toggleTextPanel() {
+    if (this.surfaceType === "source") {
+      return;
+    }
+    this.setTextPanelOpen(!this.textPanelOpen);
+  }
+
+  setTextPanelOpen(open) {
+    this.textPanelOpen = Boolean(open) && this.surfaceType !== "source";
+    this.previewEl.toggleClass("is-text-panel-open", this.textPanelOpen);
+    this.textButton?.classList.toggle("is-active", this.toolMode === TOOL_TEXT || this.textPanelOpen);
+    if (this.textPanelOpen) {
+      this.setPaletteOpen(false);
+      this.updateFloatingControlsPosition();
+      this.syncTextPanelButtons();
+    }
   }
 
   createColorPalette() {
@@ -1528,83 +1536,6 @@ class PreviewDrawingController {
       event.stopPropagation();
       this.colorInput?.click();
     });
-  }
-
-  createTextToolPanel() {
-    this.textPanel.empty();
-    this.createTextPanelSection("Content", [
-      { label: "Text", icon: "type", action: () => this.chooseTextPreset({}) },
-      { label: "Title", icon: "heading", action: () => this.chooseTextPreset({ text: "Title", fontSize: 24, bold: true, boxed: false }) },
-      { label: "Code", icon: "code-2", action: () => this.chooseTextPreset({ text: "code", fontSize: 16, boxed: true, code: true }) },
-      { label: "File", icon: "paperclip", action: () => this.chooseTextPreset({ text: "File", fontSize: 16, boxed: true, file: true }) },
-    ]);
-    this.createTextPanelSection("Style / Shape", [
-      { id: "bold", label: "Bold", text: "B", className: "notedraw-style-button", action: () => this.toggleTextStyle("bold") },
-      { id: "italic", label: "Italic", text: "I", className: "notedraw-style-button notedraw-style-italic", action: () => this.toggleTextStyle("italic") },
-      { id: "underline", label: "Underline", text: "U", className: "notedraw-style-button notedraw-style-underline", action: () => this.toggleTextStyle("underline") },
-      { id: "boxed", label: "Button box", icon: "badge", action: () => this.toggleTextStyle("boxed") },
-      { id: TOOL_RECT, label: "Box", icon: "square", action: () => this.chooseShapeTool(TOOL_RECT) },
-      { id: TOOL_LINE, label: "Line", icon: "minus", action: () => this.chooseShapeTool(TOOL_LINE) },
-      { id: TOOL_ARROW, label: "Arrow", icon: "arrow-up-right", action: () => this.chooseShapeTool(TOOL_ARROW) },
-    ]);
-  }
-
-  createTextPanelSection(title, items) {
-    const section = this.textPanel.createDiv({ cls: "notedraw-text-panel-section" });
-    section.createDiv({ cls: "notedraw-text-panel-title", text: title });
-    const grid = section.createDiv({ cls: "notedraw-text-panel-grid" });
-    for (const item of items) {
-      const button = grid.createEl("button", {
-        cls: `notedraw-text-panel-button ${item.className || ""}`.trim(),
-        attr: { type: "button", title: item.label },
-      });
-      button.dataset.noteDrawPanelId = item.id || "";
-      if (item.icon) {
-        setIcon(button, item.icon);
-      } else {
-        button.setText(item.text || item.label);
-      }
-      button.addEventListener("click", (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        item.action();
-      });
-    }
-  }
-
-  chooseTextPreset(preset) {
-    this.textStyle = {
-      ...this.textStyle,
-      bold: Boolean(preset.bold ?? this.textStyle.bold),
-      italic: Boolean(preset.italic ?? this.textStyle.italic),
-      underline: Boolean(preset.underline ?? this.textStyle.underline),
-      boxed: Boolean(preset.boxed ?? this.textStyle.boxed),
-      code: Boolean(preset.code),
-      file: Boolean(preset.file),
-      text: preset.text || "",
-      fontSize: preset.fontSize || 18,
-    };
-    this.setShapeToolMode(TOOL_TEXT);
-  }
-
-  chooseShapeTool(mode) {
-    this.setShapeToolMode(mode);
-    this.textPanelOpen = false;
-    this.previewEl.removeClass("is-text-panel-open");
-    this.updateToolButtons();
-  }
-
-  syncTextPanelButtons() {
-    if (!this.textPanel) {
-      return;
-    }
-    this.textPanel.querySelector('[data-note-draw-panel-id="bold"]')?.classList.toggle("is-active", Boolean(this.textStyle.bold));
-    this.textPanel.querySelector('[data-note-draw-panel-id="italic"]')?.classList.toggle("is-active", Boolean(this.textStyle.italic));
-    this.textPanel.querySelector('[data-note-draw-panel-id="underline"]')?.classList.toggle("is-active", Boolean(this.textStyle.underline));
-    this.textPanel.querySelector('[data-note-draw-panel-id="boxed"]')?.classList.toggle("is-active", Boolean(this.textStyle.boxed));
-    for (const mode of [TOOL_RECT, TOOL_LINE, TOOL_ARROW]) {
-      this.textPanel.querySelector(`[data-note-draw-panel-id="${mode}"]`)?.classList.toggle("is-active", this.toolMode === mode);
-    }
   }
 
   setCurrentBrushColor(color) {
@@ -1652,6 +1583,7 @@ class PreviewDrawingController {
     this.previewEl.toggleClass("is-select-mode", this.toolMode === TOOL_SELECT);
     if (this.toolMode === TOOL_SELECT) {
       this.setPaletteOpen(false);
+      this.setTextPanelOpen(false);
     }
     this.updateToolButtons();
     this.endTextEdit();
@@ -1666,14 +1598,13 @@ class PreviewDrawingController {
       return;
     }
     this.setPaletteOpen(!this.paletteOpen);
+    if (this.paletteOpen) {
+      this.setTextPanelOpen(false);
+    }
   }
 
   setPaletteOpen(open) {
     this.paletteOpen = Boolean(open);
-    if (this.paletteOpen) {
-      this.textPanelOpen = false;
-      this.previewEl.removeClass("is-text-panel-open");
-    }
     this.previewEl.toggleClass("is-palette-open", this.paletteOpen);
     this.paletteButton?.classList.toggle("is-active", this.paletteOpen);
     if (this.paletteOpen) {
@@ -1687,17 +1618,15 @@ class PreviewDrawingController {
     }
 
     const target = event.target;
-    if (this.palettePanel?.contains(target) || this.paletteButton?.contains(target)) {
-      return;
-    }
-    if (this.textPanel?.contains(target) || this.textButton?.contains(target)) {
+    if (this.palettePanel?.contains(target)
+      || this.paletteButton?.contains(target)
+      || this.textPanel?.contains(target)
+      || this.textButton?.contains(target)) {
       return;
     }
 
     this.setPaletteOpen(false);
-    this.textPanelOpen = false;
-    this.previewEl.removeClass("is-text-panel-open");
-    this.updateToolButtons();
+    this.setTextPanelOpen(false);
   }
 
   onButtonPointerDown() {
@@ -1784,7 +1713,9 @@ class PreviewDrawingController {
     }
 
     const target = this.elementBelowCanvas(event.clientX, event.clientY);
-    const editable = this.allowTextEdit ? findEditableTarget(target, this.previewEl) : null;
+    const editable = this.allowTextEdit && this.toolMode !== TOOL_TEXT
+      ? findEditableTarget(target, this.previewEl)
+      : null;
     const sourceTextTarget = this.surfaceType === "source"
       && this.toolMode !== TOOL_SELECT
       && isSourceTextTarget(target, this.previewEl);
@@ -1801,7 +1732,7 @@ class PreviewDrawingController {
       && !this.selectedStrokeFrameContains(point)
       && hitStrokeIndex < 0) {
       this.clearSelectedStrokes();
-      if (!editable && this.toolMode !== TOOL_SELECT) {
+      if (!editable && this.toolMode !== TOOL_SELECT && this.toolMode !== TOOL_TEXT) {
         this.render();
         event.preventDefault();
         event.stopPropagation();
@@ -1809,31 +1740,66 @@ class PreviewDrawingController {
       }
     }
 
-    if (hitStrokeIndex >= 0 && !this.selectedStrokeFrameContains(point)) {
-      if (this.isStrokeSelected(hitStrokeIndex)) {
-        if (isTextStroke(this.drawingData.strokes[hitStrokeIndex]) && event.detail >= 2) {
-          this.editTextStroke(hitStrokeIndex);
-          event.preventDefault();
-          event.stopPropagation();
-          return;
-        }
-        this.startSelectedStrokeDrag(event, point, hitStrokeIndex);
-      } else {
-        this.setSelectedStrokes(hitStrokeIndex);
-        this.render();
+    if (hitStrokeIndex >= 0 && isTextStroke(this.drawingData.strokes[hitStrokeIndex]) && event.detail >= 2) {
+      this.queueFloatingTextEdit(event, point, hitStrokeIndex);
+      this.lastTextTap = null;
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+
+    if (hitStrokeIndex >= 0
+      && isTextStroke(this.drawingData.strokes[hitStrokeIndex])
+      && (this.toolMode === TOOL_TEXT || this.toolMode === TOOL_SELECT)) {
+      if (this.isRepeatTextTap(hitStrokeIndex, point, event)) {
+        this.queueFloatingTextEdit(event, point, hitStrokeIndex);
+        this.lastTextTap = null;
         event.preventDefault();
         event.stopPropagation();
+        return;
       }
+      this.rememberTextTap(hitStrokeIndex, point, event);
+      this.setSelectedStrokes(hitStrokeIndex);
+      this.startTextPointerInteraction(event, point, hitStrokeIndex);
+      this.render();
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+
+    const selectedTextIndex = this.getSelectedStrokeIndexes().find((index) => isTextStroke(this.drawingData.strokes[index]));
+    if (selectedTextIndex >= 0 && this.selectedStrokeFrameContains(point)) {
+      if (this.isRepeatTextTap(selectedTextIndex, point)) {
+        this.queueFloatingTextEdit(event, point, selectedTextIndex);
+        this.lastTextTap = null;
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+      this.rememberTextTap(selectedTextIndex, point);
+    }
+
+    if (event.detail >= 2 && selectedTextIndex >= 0 && this.selectedStrokeFrameContains(point)) {
+      this.queueFloatingTextEdit(event, point, selectedTextIndex);
+      this.lastTextTap = null;
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+
+    if (hitStrokeIndex >= 0 && this.toolMode === TOOL_DRAW && !editable) {
+      if (this.isStrokeSelected(hitStrokeIndex)) {
+        this.startSelectedStrokeDrag(event, point, hitStrokeIndex);
+        return;
+      }
+      this.setSelectedStrokes(hitStrokeIndex);
+      this.render();
+      event.preventDefault();
+      event.stopPropagation();
       return;
     }
 
     if (this.selectedStrokeFrameContains(point)) {
-      if (hitStrokeIndex >= 0 && isTextStroke(this.drawingData.strokes[hitStrokeIndex]) && event.detail >= 2) {
-        this.editTextStroke(hitStrokeIndex);
-        event.preventDefault();
-        event.stopPropagation();
-        return;
-      }
       this.startSelectedStrokeDrag(event, point, hitStrokeIndex);
       return;
     }
@@ -1847,6 +1813,7 @@ class PreviewDrawingController {
     this.pointerDown = true;
     this.didMove = false;
     this.pointerStartClient = { x: event.clientX, y: event.clientY };
+    this.pointerLastClient = this.pointerStartClient;
     this.pointerStartPoint = point;
     this.pointerStartEditable = editable;
     this.pointerStartSourceText = sourceTextTarget;
@@ -1862,48 +1829,24 @@ class PreviewDrawingController {
       // Pointer capture is best-effort; drawing still works without it.
     }
 
-    this.currentStroke = this.createStrokeDraft(this.pointerStartPoint);
-    event.preventDefault();
-    event.stopPropagation();
-  }
+    if (this.toolMode === TOOL_TEXT) {
+      this.currentStroke = null;
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
 
-  createStrokeDraft(point) {
     const brush = this.currentBrushSettings();
-    const base = {
+    this.currentStroke = {
+      brush: this.brushMode,
       color: brush.color,
       width: brush.width,
       opacity: brush.opacity,
       count: brush.count,
-      points: [point],
+      points: [this.pointerStartPoint],
     };
-
-    if (this.toolMode === TOOL_TEXT) {
-      return {
-        ...base,
-        kind: TOOL_TEXT,
-        text: this.textStyle.text || "",
-        fontSize: this.textStyle.fontSize || 18,
-        bold: Boolean(this.textStyle.bold),
-        italic: Boolean(this.textStyle.italic),
-        underline: Boolean(this.textStyle.underline),
-        boxed: Boolean(this.textStyle.boxed),
-        code: Boolean(this.textStyle.code),
-        file: Boolean(this.textStyle.file),
-      };
-    }
-
-    if ([TOOL_RECT, TOOL_LINE, TOOL_ARROW].includes(this.toolMode)) {
-      return {
-        ...base,
-        kind: this.toolMode,
-        points: [point, point],
-      };
-    }
-
-    return {
-      ...base,
-      brush: this.brushMode,
-    };
+    event.preventDefault();
+    event.stopPropagation();
   }
 
   elementBelowCanvas(clientX, clientY) {
@@ -1939,7 +1882,42 @@ class PreviewDrawingController {
       return;
     }
 
-    if (!this.active || !this.pointerDown || !this.currentStroke || event.pointerId !== this.activePointerId) {
+    if (!this.active || !this.pointerDown || event.pointerId !== this.activePointerId) {
+      return;
+    }
+
+    if (!this.currentStroke && (this.toolMode === TOOL_TEXT || this.pointerStartTextStrokeIndex >= 0)) {
+      const movedDistance = this.pointerStartClient
+        ? pointerDistance(this.pointerStartClient, { x: event.clientX, y: event.clientY })
+        : 0;
+      this.didMove = movedDistance > SELECT_TAP_DISTANCE;
+      if (this.didMove && this.pendingFloatingTextEdit) {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+      if (this.didMove && this.pointerStartTextStrokeIndex >= 0) {
+        this.pendingFloatingTextEdit = null;
+        const startPoint = this.pointerStartPoint || this.eventToPoint(event);
+        const textStrokeIndex = this.pointerStartTextStrokeIndex;
+        this.pointerStartTextStrokeIndex = -1;
+        this.startSelectedStrokeDrag(event, startPoint, textStrokeIndex);
+        this.moveSelectedStroke(event);
+        return;
+      }
+      if (this.toolMode === TOOL_TEXT
+        && this.didMove
+        && event.pointerType === "touch"
+        && this.pointerStartTextStrokeIndex < 0) {
+        this.scrollTextModeTouch(event);
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+
+    if (!this.currentStroke) {
       return;
     }
 
@@ -2001,11 +1979,9 @@ class PreviewDrawingController {
       return;
     }
 
-    if (!this.active || !this.pointerDown || !this.currentStroke || event.pointerId !== this.activePointerId) {
+    if (!this.active || !this.pointerDown || event.pointerId !== this.activePointerId) {
       return;
     }
-
-    this.addPointerSamples(event);
 
     this.pointerDown = false;
     const movedDistance = this.pointerStartClient
@@ -2013,31 +1989,32 @@ class PreviewDrawingController {
       : 0;
     const editable = this.pointerStartEditable;
 
-    if (this.currentStroke.kind === TOOL_TEXT) {
-      const text = window.prompt("Text", this.currentStroke.text || "");
-      if (text?.trim()) {
-        this.currentStroke.text = text.trim();
-        this.drawingData.strokes.push(this.currentStroke);
-        this.clearSelectedStrokes();
-        this.redoStack = [];
-        this.invalidateStaticCache();
-        this.plugin.scheduleDrawingSave(this.file, this.drawingData);
-      } else {
-        this.setSelectedStrokes(this.findStrokeAt(this.pointerStartPoint || this.eventToPoint(event)));
+    if (!this.currentStroke && (this.toolMode === TOOL_TEXT || this.pointerStartTextStrokeIndex >= 0)) {
+      const point = this.pointerStartPoint || this.eventToPoint(event);
+      const pendingEdit = this.pendingFloatingTextEdit;
+      this.pendingFloatingTextEdit = null;
+      if (pendingEdit && movedDistance <= SELECT_TAP_DISTANCE && !this.didMove) {
+        this.finishPointerInteraction(event);
+        this.editFloatingTextStroke(pendingEdit.index, pendingEdit.point);
+        return;
       }
-      this.currentStroke = null;
-    } else if (isStructuredStroke(this.currentStroke) && this.currentStroke.kind !== TOOL_TEXT) {
-      if (this.didMove && movedDistance > SELECT_TAP_DISTANCE) {
-        this.drawingData.strokes.push(this.currentStroke);
-        this.clearSelectedStrokes();
-        this.redoStack = [];
-        this.invalidateStaticCache();
-        this.plugin.scheduleDrawingSave(this.file, this.drawingData);
-      } else {
-        this.setSelectedStrokes(this.findStrokeAt(this.pointerStartPoint || this.eventToPoint(event)));
+      if (this.pointerStartTextStrokeIndex >= 0) {
+        this.pointerStartTextStrokeIndex = -1;
+      } else if (this.toolMode === TOOL_TEXT && movedDistance <= SELECT_TAP_DISTANCE && !this.didMove) {
+        this.openFloatingTextInput(point);
       }
-      this.currentStroke = null;
-    } else if (!this.didMove || movedDistance <= SELECT_TAP_DISTANCE || this.currentStroke.points.length < 2) {
+      this.finishPointerInteraction(event);
+      return;
+    }
+
+    if (!this.currentStroke) {
+      this.finishPointerInteraction(event);
+      return;
+    }
+
+    this.addPointerSamples(event);
+
+    if (!this.didMove || movedDistance <= SELECT_TAP_DISTANCE || this.currentStroke.points.length < 2) {
       const point = this.pointerStartPoint || this.eventToPoint(event);
       this.currentStroke = null;
       if (editable) {
@@ -2045,9 +2022,13 @@ class PreviewDrawingController {
       } else if (this.pointerStartSourceText) {
         this.focusSourceEditorAt(this.pointerStartClient || { x: event.clientX, y: event.clientY });
         this.clearSelectedStrokes();
+      } else if (this.toolMode === TOOL_TEXT) {
+        this.openFloatingTextInput(point);
       } else {
         this.setSelectedStrokes(this.findStrokeAt(point));
       }
+    } else if (this.currentStroke.kind === TOOL_TEXT) {
+      this.currentStroke = null;
     } else {
       this.drawingData.strokes.push(this.currentStroke);
       this.clearSelectedStrokes();
@@ -2057,8 +2038,12 @@ class PreviewDrawingController {
       this.currentStroke = null;
     }
 
+    this.finishPointerInteraction(event);
+  }
+
+  finishPointerInteraction(event) {
     try {
-      if (this.canvas.hasPointerCapture?.(event.pointerId)) {
+      if (event && this.canvas.hasPointerCapture?.(event.pointerId)) {
         this.canvas.releasePointerCapture(event.pointerId);
       }
     } catch (_) {
@@ -2067,13 +2052,376 @@ class PreviewDrawingController {
 
     this.pointerStartPoint = null;
     this.pointerStartClient = null;
+    this.pointerLastClient = null;
     this.pointerStartEditable = null;
     this.pointerStartSourceText = false;
+    this.pointerStartTextStrokeIndex = -1;
+    this.pendingFloatingTextEdit = null;
     this.activePointerId = null;
     this.didMove = false;
     this.render();
+    event?.preventDefault();
+    event?.stopPropagation();
+  }
+
+  onCanvasDoubleClick(event) {
+    if (!this.active || event.button !== 0) {
+      return;
+    }
+    if (this.floatingTextInput) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+
+    const point = this.eventToPoint(event);
+    const hitStrokeIndex = this.findStrokeAt(point);
+    if (hitStrokeIndex >= 0 && isTextStroke(this.drawingData.strokes[hitStrokeIndex])) {
+      this.deferFloatingTextEdit(hitStrokeIndex, point);
+      this.lastTextTap = null;
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+
+    const selectedTextIndex = this.getSelectedStrokeIndexes().find((index) => isTextStroke(this.drawingData.strokes[index]));
+    if (selectedTextIndex >= 0 && this.selectedStrokeFrameContains(point)) {
+      this.deferFloatingTextEdit(selectedTextIndex, point);
+      this.lastTextTap = null;
+      event.preventDefault();
+      event.stopPropagation();
+    }
+  }
+
+  startTextPointerInteraction(event, point, strokeIndex = -1) {
+    this.pointerDown = true;
+    this.didMove = false;
+    this.currentStroke = null;
+    this.pointerStartClient = { x: event.clientX, y: event.clientY };
+    this.pointerLastClient = this.pointerStartClient;
+    this.pointerStartPoint = point;
+    this.pointerStartEditable = null;
+    this.pointerStartSourceText = false;
+    this.pointerStartTextStrokeIndex = strokeIndex;
+    this.activePointerId = event.pointerId;
+    this.endTextEdit();
+
+    try {
+      this.canvas.setPointerCapture(event.pointerId);
+    } catch (_) {
+      // Pointer capture is best-effort; text interaction still works without it.
+    }
+  }
+
+  queueFloatingTextEdit(event, point, index) {
+    this.pendingFloatingTextEdit = { index, point };
+    this.startTextPointerInteraction(event, point, index);
+  }
+
+  scrollTextModeTouch(event) {
+    const previous = this.pointerLastClient || this.pointerStartClient;
+    this.pointerLastClient = { x: event.clientX, y: event.clientY };
+    const scroller = findScrollableAncestor(this.previewEl);
+    if (previous && scroller) {
+      scroller.scrollBy({
+        left: previous.x - event.clientX,
+        top: previous.y - event.clientY,
+        behavior: "auto",
+      });
+    }
     event.preventDefault();
     event.stopPropagation();
+  }
+
+  deferFloatingTextEdit(index, point) {
+    window.setTimeout(() => {
+      this.editFloatingTextStroke(index, point);
+    }, 0);
+  }
+
+  rememberTextTap(index, point) {
+    this.lastTextTap = {
+      index,
+      point,
+      time: Date.now(),
+    };
+  }
+
+  isRepeatTextTap(index, point) {
+    if (!this.lastTextTap || this.lastTextTap.index !== index) {
+      return false;
+    }
+    const now = Date.now();
+    const elapsed = now - this.lastTextTap.time;
+    if (elapsed < 0 || elapsed > 500) {
+      return false;
+    }
+    const distance = pointDistanceOnCanvas(
+      this.lastTextTap.point,
+      point,
+      this.canvasWidth(),
+      this.canvasHeight(),
+    );
+    return distance <= SELECT_TAP_DISTANCE * 2;
+  }
+
+  openFloatingTextInput(point, index = -1) {
+    this.endFloatingTextInput(false);
+    this.endTextEdit();
+
+    const existing = index >= 0 ? this.drawingData.strokes[index] : null;
+    const canvasPoint = this.pointToCanvas(point);
+    const canvasRect = this.canvas.getBoundingClientRect();
+    const anchorClientPoint = {
+      x: canvasRect.left + canvasPoint.x,
+      y: canvasRect.top + canvasPoint.y,
+    };
+    const minEditorWidth = isTextStroke(existing) ? 64 : 120;
+    const initialViewportHeight = window.visualViewport?.height || window.innerHeight || this.canvasHeight();
+    const textarea = this.previewEl.createEl("textarea", {
+      cls: "notedraw-floating-text-input",
+      attr: {
+        rows: "1",
+        spellcheck: "true",
+      },
+    });
+    textarea.value = isTextStroke(existing) ? existing.text : "";
+    textarea.style.color = isTextStroke(existing) ? existing.color : (this.currentBrushSettings().color || this.penColor);
+    textarea.style.fontSize = `${isTextStroke(existing) ? clamp(Number(existing.fontSize || 18), 10, 72) : 18}px`;
+    textarea.style.fontWeight = isTextStroke(existing) && existing.bold ? "700" : "400";
+    textarea.style.fontFamily = isTextStroke(existing) && existing.code ? "monospace" : "sans-serif";
+
+    const state = {
+      element: textarea,
+      point: { ...point, t: Date.now() },
+      anchorClientPoint,
+      index,
+      originalPoints: isTextStroke(existing)
+        ? existing.points.map((strokePoint) => ({ ...strokePoint }))
+        : null,
+      scrollLock: this.createFloatingTextScrollLock(),
+      initialViewportHeight,
+      committed: false,
+    };
+    this.floatingTextInput = state;
+    this.invalidateStaticCache();
+    this.render();
+
+    const place = () => this.placeFloatingTextInput(textarea, state.anchorClientPoint);
+    const resize = () => {
+      textarea.style.height = "auto";
+      textarea.style.width = "auto";
+      const centeredWidth = Math.min(Math.max(minEditorWidth, textarea.scrollWidth + 8, 180), Math.max(180, this.canvasWidth() - 24));
+      textarea.style.width = `${centeredWidth}px`;
+      textarea.style.height = `${Math.max(32, textarea.scrollHeight + 4)}px`;
+      place();
+    };
+
+    const commit = () => this.commitFloatingTextInput(state);
+    const cancel = () => this.endFloatingTextInput(false, state);
+    const onViewportChange = () => {
+      this.restoreFloatingTextInputScrollLock();
+      resize();
+      place();
+    };
+    state.cleanup = () => {
+      window.visualViewport?.removeEventListener("resize", onViewportChange);
+      window.visualViewport?.removeEventListener("scroll", onViewportChange);
+    };
+    textarea.addEventListener("input", resize);
+    textarea.addEventListener("blur", commit);
+    textarea.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        cancel();
+      } else if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+        event.preventDefault();
+        commit();
+      }
+    });
+    window.visualViewport?.addEventListener("resize", onViewportChange);
+    window.visualViewport?.addEventListener("scroll", onViewportChange);
+
+    window.requestAnimationFrame(() => {
+      resize();
+      place();
+      try {
+        textarea.focus({ preventScroll: true });
+      } catch (_) {
+        textarea.focus();
+      }
+      textarea.setSelectionRange(0, textarea.value.length);
+      this.restoreFloatingTextInputScrollLock();
+      window.setTimeout(place, 260);
+      window.setTimeout(() => this.restoreFloatingTextInputScrollLock(), 280);
+    });
+  }
+
+  createFloatingTextScrollLock() {
+    const scroller = findScrollableAncestor(this.previewEl) || document.scrollingElement;
+    if (!scroller) {
+      return null;
+    }
+    return {
+      scroller,
+      left: scroller.scrollLeft || 0,
+      top: scroller.scrollTop || 0,
+      restoring: false,
+    };
+  }
+
+  restoreFloatingTextInputScrollLock() {
+    const lock = this.floatingTextInput?.scrollLock;
+    if (!lock?.scroller || lock.restoring) {
+      return;
+    }
+    const currentLeft = lock.scroller.scrollLeft || 0;
+    const currentTop = lock.scroller.scrollTop || 0;
+    if (Math.abs(currentLeft - lock.left) < 1 && Math.abs(currentTop - lock.top) < 1) {
+      return;
+    }
+    lock.restoring = true;
+    lock.scroller.scrollLeft = lock.left;
+    lock.scroller.scrollTop = lock.top;
+    window.setTimeout(() => {
+      lock.restoring = false;
+    }, 0);
+  }
+
+  placeFloatingTextInput(textarea, anchorClientPoint) {
+    const viewportWidth = window.innerWidth || this.canvasWidth();
+    const viewportHeight = window.innerHeight || this.canvasHeight();
+    const margin = 12;
+    const inputWidth = textarea.offsetWidth || 120;
+    const inputHeight = textarea.offsetHeight || 32;
+    const minClientX = margin;
+    const maxClientX = Math.max(minClientX, viewportWidth - inputWidth - margin);
+    const minClientY = margin;
+    const maxClientY = Math.max(minClientY, viewportHeight - inputHeight - margin);
+    const targetX = anchorClientPoint.x;
+    const targetY = anchorClientPoint.y;
+    const clientX = clamp(targetX, minClientX, maxClientX);
+    const clientY = clamp(targetY, minClientY, maxClientY);
+    textarea.style.left = `${Math.max(0, Math.round(clientX))}px`;
+    textarea.style.top = `${Math.max(0, Math.round(clientY))}px`;
+  }
+
+  commitFloatingTextInput(state = this.floatingTextInput) {
+    if (!state || state.committed) {
+      return;
+    }
+    state.committed = true;
+
+    const text = state.element.value.trim();
+    if (!text) {
+      this.endFloatingTextInput(false, state);
+      return;
+    }
+
+    const editedExistingText = state.index >= 0 && isTextStroke(this.drawingData.strokes[state.index]);
+    if (editedExistingText) {
+      const stroke = this.drawingData.strokes[state.index];
+      stroke.text = text;
+      if (Array.isArray(state.originalPoints) && state.originalPoints.length) {
+        stroke.points = state.originalPoints.map((strokePoint) => ({ ...strokePoint }));
+      }
+      this.setSelectedStrokes(state.index);
+    } else {
+      const brush = this.currentBrushSettings();
+      const preset = createTextPreset(this.textPreset, text, brush.color || this.penColor);
+      const stroke = {
+        kind: TOOL_TEXT,
+        brush: BRUSH_PEN,
+        color: preset.color,
+        width: 3,
+        opacity: 1,
+        count: 1,
+        text: preset.text,
+        fontSize: preset.fontSize,
+        bold: preset.bold,
+        code: preset.code,
+        boxed: preset.boxed,
+        file: preset.file,
+        points: [{ ...state.point, t: Date.now() }],
+      };
+      this.drawingData.strokes.push(stroke);
+      this.setSelectedStrokes(this.drawingData.strokes.length - 1);
+    }
+
+    this.redoStack = [];
+    this.invalidateStaticCache();
+    this.plugin.scheduleDrawingSave(this.file, this.drawingData);
+    this.endFloatingTextInput(false, state);
+    if (editedExistingText) {
+      this.toolMode = TOOL_TEXT;
+      this.previewEl.removeClass("is-select-mode");
+      this.setTextPanelOpen(false);
+      this.updateToolButtons();
+    }
+    this.clearFloatingTextInteractionState();
+    this.render();
+  }
+
+  endFloatingTextInput(commit = true, state = this.floatingTextInput) {
+    if (!state) {
+      return;
+    }
+    if (commit && !state.committed) {
+      this.commitFloatingTextInput(state);
+      return;
+    }
+    state.cleanup?.();
+    state.element?.remove();
+    if (this.floatingTextInput === state) {
+      this.floatingTextInput = null;
+    }
+    this.invalidateStaticCache();
+    this.clearFloatingTextInteractionState();
+  }
+
+  clearFloatingTextInteractionState() {
+    this.pendingFloatingTextEdit = null;
+    this.lastTextTap = null;
+    this.pointerStartTextStrokeIndex = -1;
+    this.pointerLastClient = null;
+    this.pointerDown = false;
+    this.currentStroke = null;
+    this.didMove = false;
+    this.touchPointers.clear();
+    this.multiTouchScrolling = false;
+    this.multiTouchLastCenter = null;
+    this.suppressTouchDrawing = false;
+    this.draggingStroke = false;
+    this.resizingSelection = false;
+    this.selectingStrokes = false;
+    this.previewEl.removeClass("is-two-finger-scroll");
+    this.previewEl.removeClass("is-moving-selection");
+    this.previewEl.removeClass("is-resizing-selection");
+    this.previewEl.removeClass("is-selecting-strokes");
+
+    if (this.activePointerId !== null) {
+      try {
+        if (this.canvas.hasPointerCapture?.(this.activePointerId)) {
+          this.canvas.releasePointerCapture(this.activePointerId);
+        }
+      } catch (_) {
+        // Ignore release errors from already-cancelled pointers.
+      }
+      this.activePointerId = null;
+    }
+  }
+
+  editFloatingTextStroke(index, point = null) {
+    const stroke = this.drawingData.strokes[index];
+    if (!isTextStroke(stroke)) {
+      return;
+    }
+    if (this.floatingTextInput?.index === index) {
+      this.floatingTextInput.element?.focus();
+      return;
+    }
+    this.setSelectedStrokes(index);
+    this.openFloatingTextInput(stroke.points[0], index);
   }
 
   onWheel(event) {
@@ -2146,8 +2494,11 @@ class PreviewDrawingController {
     this.pointerDown = false;
     this.pointerStartPoint = null;
     this.pointerStartClient = null;
+    this.pointerLastClient = null;
     this.pointerStartEditable = null;
     this.pointerStartSourceText = false;
+    this.pointerStartTextStrokeIndex = -1;
+    this.pendingFloatingTextEdit = null;
     this.activePointerId = null;
     this.didMove = false;
     this.render();
@@ -2256,14 +2607,13 @@ class PreviewDrawingController {
     }
 
     const point = this.eventToPoint(event);
-    const originalBounds = getNormalizedBoundsForIndexedStrokes(this.drawingData.strokes, this.dragStrokeOriginalPoints);
-    if (!originalBounds) {
-      return;
-    }
-    const minX = originalBounds.minX;
-    const maxX = originalBounds.maxX;
-    const minY = originalBounds.minY;
-    const maxY = originalBounds.maxY;
+    const originalPoints = Array.from(this.dragStrokeOriginalPoints.values()).flat();
+    const xs = originalPoints.map((strokePoint) => strokePoint.x);
+    const ys = originalPoints.map((strokePoint) => strokePoint.y);
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    const minY = Math.min(...ys);
+    const maxY = Math.max(...ys);
     const dx = clamp(point.x - this.dragStrokeStartPoint.x, -minX, 1 - maxX);
     const dy = clamp(point.y - this.dragStrokeStartPoint.y, -minY, 1 - maxY);
     const movedDistance = pointDistanceOnCanvas(
@@ -2297,12 +2647,13 @@ class PreviewDrawingController {
 
   finishSelectedStrokeDrag(event) {
     if (this.dragStrokeMoved) {
+      this.lastTextTap = null;
       this.redoStack = [];
       this.plugin.scheduleDrawingSave(this.file, this.drawingData);
     } else if (this.getSelectedStrokeIndexes().length > 1 && this.dragStrokeHitIndex >= 0) {
       this.setSelectedStrokes(this.dragStrokeHitIndex);
-    } else if (this.dragStrokeHitIndex >= 0) {
-      this.setSelectedStrokes(this.dragStrokeHitIndex);
+    } else {
+      this.cancelSelectedStrokeDrag(true);
     }
 
     this.releasePointerCapture(event.pointerId);
@@ -2341,25 +2692,6 @@ class PreviewDrawingController {
     this.previewEl.removeClass("is-moving-selection");
   }
 
-  editTextStroke(index) {
-    const stroke = this.drawingData.strokes[index];
-    if (!isTextStroke(stroke)) {
-      return;
-    }
-
-    const text = window.prompt("Text", stroke.text || "");
-    if (text === null) {
-      return;
-    }
-
-    stroke.text = text.trim() || "Text";
-    this.setSelectedStrokes(index);
-    this.redoStack = [];
-    this.invalidateStaticCache();
-    this.plugin.scheduleDrawingSave(this.file, this.drawingData);
-    this.render();
-  }
-
   startSelectedStrokeResize(event, point, handle) {
     const indexes = this.getSelectedStrokeIndexes();
     const bounds = this.getSelectedStrokeNormalizedBounds();
@@ -2378,8 +2710,8 @@ class PreviewDrawingController {
       index,
       {
         width: this.drawingData.strokes[index].width || this.penWidth,
+        fontSize: this.drawingData.strokes[index].fontSize || 18,
         points: this.drawingData.strokes[index].points.map((strokePoint) => ({ ...strokePoint })),
-        fontSize: this.drawingData.strokes[index].fontSize,
       },
     ]));
     this.resizeSelectionMoved = false;
@@ -2442,7 +2774,7 @@ class PreviewDrawingController {
     for (const [index, original] of originalStrokes.entries()) {
       nextByIndex.set(index, {
         width: clamp((original.width || this.penWidth) * strokeScale, 0.5, 80),
-        fontSize: original.fontSize ? clamp(Number(original.fontSize) * strokeScale, 10, 96) : undefined,
+        fontSize: clamp((original.fontSize || 18) * strokeScale, 10, 72),
         points: original.points.map((strokePoint) => ({
           x: anchor.x + (strokePoint.x - anchor.x) * scaleX,
           y: anchor.y + (strokePoint.y - anchor.y) * scaleY,
@@ -2459,7 +2791,7 @@ class PreviewDrawingController {
       }
 
       stroke.width = next.width;
-      if (next.fontSize) {
+      if (isTextStroke(stroke)) {
         stroke.fontSize = next.fontSize;
       }
       stroke.points = next.points.map((strokePoint) => ({
@@ -2490,7 +2822,7 @@ class PreviewDrawingController {
         const stroke = this.drawingData.strokes[index];
         if (stroke) {
           stroke.width = original.width;
-          if (original.fontSize) {
+          if (isTextStroke(stroke)) {
             stroke.fontSize = original.fontSize;
           }
           stroke.points = original.points.map((strokePoint) => ({ ...strokePoint }));
@@ -2548,21 +2880,6 @@ class PreviewDrawingController {
 
   addStrokePoint(point) {
     if (!this.currentStroke?.points?.length) {
-      return;
-    }
-
-    if (isStructuredStroke(this.currentStroke)) {
-      if (this.pointerStartClient && pointDistanceOnCanvas(
-        this.pointerStartPoint,
-        point,
-        this.canvasWidth(),
-        this.canvasHeight(),
-      ) > SELECT_TAP_DISTANCE) {
-        this.didMove = true;
-      }
-      if (this.currentStroke.kind !== TOOL_TEXT) {
-        this.currentStroke.points[1] = point;
-      }
       return;
     }
 
@@ -2645,6 +2962,9 @@ class PreviewDrawingController {
     }
 
     for (const [index, stroke] of this.drawingData.strokes.entries()) {
+      if (this.isFloatingTextInputEditing(index)) {
+        continue;
+      }
       if (this.isStrokeSelected(index)) {
         this.drawStroke(stroke, SELECTED_STROKE_ALPHA);
       }
@@ -2668,6 +2988,9 @@ class PreviewDrawingController {
 
     this.staticCtx.clearRect(0, 0, this.canvasWidth(), this.canvasHeight());
     for (const [index, stroke] of this.drawingData.strokes.entries()) {
+      if (this.isFloatingTextInputEditing(index)) {
+        continue;
+      }
       if (!this.isStrokeSelected(index)) {
         this.drawStrokeOn(this.staticCtx, stroke);
       }
@@ -2683,13 +3006,19 @@ class PreviewDrawingController {
     this.drawStrokeOn(this.ctx, stroke, alpha);
   }
 
+  isFloatingTextInputEditing(index) {
+    return this.floatingTextInput?.index === index
+      && index >= 0
+      && isTextStroke(this.drawingData.strokes[index]);
+  }
+
   drawStrokeOn(ctx, stroke, alpha = 1) {
     if (!stroke.points.length) {
       return;
     }
 
-    if (isStructuredStroke(stroke)) {
-      this.drawStructuredStrokeOn(ctx, stroke, alpha);
+    if (isTextStroke(stroke)) {
+      this.drawTextStrokeOn(ctx, stroke, alpha);
       return;
     }
 
@@ -2725,79 +3054,38 @@ class PreviewDrawingController {
     ctx.restore();
   }
 
-  drawStructuredStrokeOn(ctx, stroke, alpha = 1) {
-    const points = stroke.points || [];
-    const first = this.pointToCanvas(points[0]);
-    const second = this.pointToCanvas(points[1] || points[0]);
-    const color = stroke.color || this.penColor;
-    const width = Math.max(MIN_BRUSH_WIDTH, stroke.width || this.penWidth);
-    const opacity = clamp(Number(stroke.opacity ?? DEFAULT_PEN_OPACITY), 0, 1);
+  drawTextStrokeOn(ctx, stroke, alpha = 1) {
+    const text = String(stroke.text || "").trim();
+    if (!text || !stroke.points.length) {
+      return;
+    }
+
+    const point = this.pointToCanvas(stroke.points[0]);
+    const fontSize = clamp(Number(stroke.fontSize || 18), 10, 72);
+    const opacity = clamp(Number(stroke.opacity ?? 1), 0, 1);
+    const paddingX = stroke.boxed || stroke.code || stroke.file ? Math.max(8, fontSize * 0.45) : 0;
+    const paddingY = stroke.boxed || stroke.code || stroke.file ? Math.max(4, fontSize * 0.26) : 0;
 
     ctx.save();
     ctx.globalAlpha = alpha * opacity;
-    ctx.strokeStyle = color;
-    ctx.fillStyle = color;
-    ctx.lineWidth = width;
-    ctx.lineCap = "round";
-    ctx.lineJoin = "round";
-
-    if (stroke.kind === TOOL_TEXT) {
-      const fontSize = clamp(Number(stroke.fontSize || 18), 10, 96);
-      const text = String(stroke.text || "Text");
-      const fontFamily = stroke.code
-        ? "ui-monospace, SFMono-Regular, Consolas, monospace"
-        : "system-ui, -apple-system, Segoe UI, sans-serif";
-      ctx.font = `${stroke.italic ? "italic " : ""}${stroke.bold ? "700 " : "500 "}${fontSize}px ${fontFamily}`;
-      ctx.textBaseline = "top";
+    ctx.font = `${stroke.bold ? "700 " : ""}${fontSize}px ${stroke.code ? "monospace" : "sans-serif"}`;
+    ctx.textBaseline = "top";
+    ctx.fillStyle = stroke.color || this.penColor;
+    if (paddingX || paddingY) {
       const metrics = ctx.measureText(text);
-      const paddingX = stroke.boxed ? 8 : 0;
-      const paddingY = stroke.boxed ? 5 : 0;
-      if (stroke.boxed) {
-        ctx.save();
-        ctx.globalAlpha = alpha * Math.max(stroke.code ? 0.22 : 0.14, opacity * 0.18);
-        ctx.fillStyle = color;
-        roundRect(ctx, first.x - paddingX, first.y - paddingY, metrics.width + paddingX * 2, fontSize + paddingY * 2, 7);
-        ctx.fill();
-        ctx.restore();
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 1.5;
-        roundRect(ctx, first.x - paddingX, first.y - paddingY, metrics.width + paddingX * 2, fontSize + paddingY * 2, 7);
-        ctx.stroke();
-      }
-      ctx.fillStyle = color;
-      ctx.fillText(text, first.x, first.y);
-      if (stroke.underline) {
-        const underlineY = first.y + fontSize + 2;
-        ctx.beginPath();
-        ctx.moveTo(first.x, underlineY);
-        ctx.lineTo(first.x + metrics.width, underlineY);
-        ctx.stroke();
-      }
-      ctx.restore();
-      return;
-    }
-
-    if (stroke.kind === TOOL_RECT) {
-      const rect = normalizeCanvasRect(first, second);
-      ctx.save();
-      ctx.globalAlpha = alpha * Math.max(0.08, opacity * 0.12);
-      ctx.fillStyle = color;
-      roundRect(ctx, rect.minX, rect.minY, rect.maxX - rect.minX, rect.maxY - rect.minY, 8);
+      const width = Math.max(fontSize, metrics.width);
+      const height = fontSize * 1.28;
+      ctx.fillStyle = stroke.code
+        ? "rgba(127, 127, 127, 0.14)"
+        : "rgba(255, 255, 255, 0.74)";
+      ctx.strokeStyle = stroke.color || this.penColor;
+      ctx.lineWidth = 1.25;
+      roundRect(ctx, point.x - paddingX, point.y - paddingY, width + paddingX * 2, height + paddingY * 2, 6);
       ctx.fill();
-      ctx.restore();
-      roundRect(ctx, rect.minX, rect.minY, rect.maxX - rect.minX, rect.maxY - rect.minY, 8);
       ctx.stroke();
-      ctx.restore();
-      return;
     }
-
-    ctx.beginPath();
-    ctx.moveTo(first.x, first.y);
-    ctx.lineTo(second.x, second.y);
-    ctx.stroke();
-    if (stroke.kind === TOOL_ARROW) {
-      drawArrowHead(ctx, first, second, color, width);
-    }
+    ctx.fillStyle = stroke.color || this.penColor;
+    ctx.fillText(text, point.x, point.y);
     ctx.restore();
   }
 
@@ -3842,9 +4130,9 @@ function cleanupAllDrawingHeaderButtons() {
 }
 
 function cleanupDrawingUi(preview) {
-  preview.querySelectorAll(".notedraw-button, .notedraw-fallback-button, .notedraw-toolbar, .notedraw-palette-panel, .notedraw-canvas")
+  preview.querySelectorAll(".notedraw-button, .notedraw-fallback-button, .notedraw-toolbar, .notedraw-palette-panel, .notedraw-text-panel, .notedraw-canvas")
     .forEach((element) => element.remove());
-  preview.classList.remove("notedraw-shell", "is-drawing-active", "is-drawing-hidden", "is-select-mode", "is-palette-open", "is-watercolor-mode", "is-selecting-strokes", "is-resizing-selection");
+  preview.classList.remove("notedraw-shell", "is-drawing-active", "is-drawing-hidden", "is-select-mode", "is-palette-open", "is-text-panel-open", "is-watercolor-mode", "is-selecting-strokes", "is-resizing-selection");
 }
 
 function normalizeVaultPath(path) {
@@ -3879,25 +4167,20 @@ function normalizeDrawingData(data, file) {
 
 function normalizeStroke(stroke) {
   const points = Array.isArray(stroke?.points) ? stroke.points : [];
-  const kind = [TOOL_TEXT, TOOL_RECT, TOOL_LINE, TOOL_ARROW].includes(stroke?.kind) ? stroke.kind : null;
 
   return {
-    ...(kind ? {
-      kind,
-      text: kind === TOOL_TEXT ? String(stroke?.text || "Text").slice(0, 500) : undefined,
-      fontSize: kind === TOOL_TEXT ? clamp(Number(stroke?.fontSize || 18), 10, 96) : undefined,
-      bold: kind === TOOL_TEXT ? Boolean(stroke?.bold) : undefined,
-      italic: kind === TOOL_TEXT ? Boolean(stroke?.italic) : undefined,
-      underline: kind === TOOL_TEXT ? Boolean(stroke?.underline) : undefined,
-      boxed: kind === TOOL_TEXT ? stroke?.boxed !== false : undefined,
-      code: kind === TOOL_TEXT ? Boolean(stroke?.code) : undefined,
-      file: kind === TOOL_TEXT ? Boolean(stroke?.file) : undefined,
-    } : {}),
+    kind: stroke?.kind === TOOL_TEXT ? TOOL_TEXT : undefined,
     brush: stroke?.brush === BRUSH_WATERCOLOR ? BRUSH_WATERCOLOR : BRUSH_PEN,
     color: typeof stroke?.color === "string" ? stroke.color : "#e53935",
     width: Number.isFinite(Number(stroke?.width)) ? clamp(Number(stroke.width), MIN_BRUSH_WIDTH, 80) : 3,
     opacity: clamp(Number(stroke?.opacity ?? DEFAULT_PEN_OPACITY), 0, 1),
     count: clamp(Math.round(Number(stroke?.count) || 1), 1, MAX_PEN_COUNT),
+    text: typeof stroke?.text === "string" ? stroke.text : "",
+    fontSize: Number.isFinite(Number(stroke?.fontSize)) ? clamp(Number(stroke.fontSize), 10, 72) : 18,
+    bold: Boolean(stroke?.bold),
+    code: Boolean(stroke?.code),
+    boxed: Boolean(stroke?.boxed),
+    file: Boolean(stroke?.file),
     points: points
       .map((point) => ({
         x: clamp(Number(point?.x), 0, 1),
@@ -3906,6 +4189,27 @@ function normalizeStroke(stroke) {
       }))
       .filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y)),
   };
+}
+
+function isTextStroke(stroke) {
+  return stroke?.kind === TOOL_TEXT && typeof stroke.text === "string" && stroke.text.trim().length > 0;
+}
+
+function createTextPreset(preset, text, color) {
+  const normalized = String(text || "").trim();
+  if (preset === "title") {
+    return { text: normalized, color, fontSize: 26, bold: true, code: false, boxed: false, file: false };
+  }
+  if (preset === "code") {
+    return { text: normalized, color: "#374151", fontSize: 16, bold: false, code: true, boxed: true, file: false };
+  }
+  if (preset === "button") {
+    return { text: normalized, color, fontSize: 17, bold: true, code: false, boxed: true, file: false };
+  }
+  if (preset === "file") {
+    return { text: normalized.startsWith("@") ? normalized : `@${normalized}`, color, fontSize: 17, bold: false, code: false, boxed: true, file: true };
+  }
+  return { text: normalized, color, fontSize: 18, bold: false, code: false, boxed: false, file: false };
 }
 
 function compactDrawingData(data) {
@@ -4566,19 +4870,19 @@ function getStrokeBounds(stroke, width, height) {
     return null;
   }
 
-  if (stroke.kind === TOOL_TEXT) {
+  if (isTextStroke(stroke)) {
     const point = stroke.points[0];
-    const fontSize = clamp(Number(stroke.fontSize || 18), 10, 96);
-    const textWidth = estimateTextWidth(stroke.text || "Text", fontSize, Boolean(stroke.bold));
-    const paddingX = stroke.boxed ? 8 : 0;
-    const paddingY = stroke.boxed ? 5 : 0;
+    const fontSize = clamp(Number(stroke.fontSize || 18), 10, 72);
+    const textWidth = Math.max(fontSize, String(stroke.text || "").length * fontSize * 0.62);
+    const paddingX = stroke.boxed || stroke.code || stroke.file ? Math.max(8, fontSize * 0.45) : 0;
+    const paddingY = stroke.boxed || stroke.code || stroke.file ? Math.max(4, fontSize * 0.26) : 0;
     const x = point.x * width;
     const y = point.y * height;
     return {
       minX: x - paddingX,
       minY: y - paddingY,
       maxX: x + textWidth + paddingX,
-      maxY: y + fontSize + paddingY,
+      maxY: y + fontSize * 1.28 + paddingY,
     };
   }
 
@@ -4607,68 +4911,6 @@ function rectsIntersect(a, b) {
     && a.maxX >= b.minX
     && a.minY <= b.maxY
     && a.maxY >= b.minY;
-}
-
-function isStructuredStroke(stroke) {
-  return [TOOL_TEXT, TOOL_RECT, TOOL_LINE, TOOL_ARROW].includes(stroke?.kind);
-}
-
-function isTextStroke(stroke) {
-  return stroke?.kind === TOOL_TEXT;
-}
-
-function estimateTextWidth(text, fontSize, bold = false) {
-  const weight = bold ? 0.64 : 0.58;
-  return Math.max(fontSize * 1.5, String(text || "Text").length * fontSize * weight);
-}
-
-function roundRect(ctx, x, y, width, height, radius) {
-  const r = Math.min(radius, Math.abs(width) / 2, Math.abs(height) / 2);
-  ctx.beginPath();
-  ctx.moveTo(x + r, y);
-  ctx.lineTo(x + width - r, y);
-  ctx.quadraticCurveTo(x + width, y, x + width, y + r);
-  ctx.lineTo(x + width, y + height - r);
-  ctx.quadraticCurveTo(x + width, y + height, x + width - r, y + height);
-  ctx.lineTo(x + r, y + height);
-  ctx.quadraticCurveTo(x, y + height, x, y + height - r);
-  ctx.lineTo(x, y + r);
-  ctx.quadraticCurveTo(x, y, x + r, y);
-  ctx.closePath();
-}
-
-function drawArrowHead(ctx, from, to, color, width) {
-  const angle = Math.atan2(to.y - from.y, to.x - from.x);
-  const size = Math.max(10, width * 3.2);
-  ctx.save();
-  ctx.fillStyle = color;
-  ctx.beginPath();
-  ctx.moveTo(to.x, to.y);
-  ctx.lineTo(to.x - size * Math.cos(angle - Math.PI / 6), to.y - size * Math.sin(angle - Math.PI / 6));
-  ctx.lineTo(to.x - size * Math.cos(angle + Math.PI / 6), to.y - size * Math.sin(angle + Math.PI / 6));
-  ctx.closePath();
-  ctx.fill();
-  ctx.restore();
-}
-
-function getNormalizedBoundsForIndexedStrokes(strokes, pointsByIndex) {
-  let result = null;
-  for (const [index, points] of pointsByIndex.entries()) {
-    const clone = { ...(strokes[index] || {}), points };
-    const bounds = getStrokeBounds(clone, 1, 1);
-    if (!bounds) {
-      continue;
-    }
-    result = result
-      ? {
-          minX: Math.min(result.minX, bounds.minX),
-          minY: Math.min(result.minY, bounds.minY),
-          maxX: Math.max(result.maxX, bounds.maxX),
-          maxY: Math.max(result.maxY, bounds.maxY),
-        }
-      : { ...bounds };
-  }
-  return result;
 }
 
 function getSelectionHandlePointsFromRect(rect) {
@@ -4784,13 +5026,13 @@ function getPenOffsets(count, width) {
 }
 
 function strokeHitTest(stroke, hitPoint, width, height, threshold) {
-  if (stroke.kind === TOOL_TEXT || stroke.kind === TOOL_RECT) {
+  if (isTextStroke(stroke)) {
     const bounds = getStrokeBounds(stroke, width, height);
-    return Boolean(bounds
+    return Boolean(bounds)
       && hitPoint.x >= bounds.minX - threshold
       && hitPoint.x <= bounds.maxX + threshold
       && hitPoint.y >= bounds.minY - threshold
-      && hitPoint.y <= bounds.maxY + threshold);
+      && hitPoint.y <= bounds.maxY + threshold;
   }
 
   const points = stroke.points.map((point) => ({
@@ -4826,6 +5068,21 @@ function distanceToSegment(point, start, end) {
   };
 
   return pointerDistance(point, projection);
+}
+
+function roundRect(ctx, x, y, width, height, radius) {
+  const r = Math.max(0, Math.min(radius, width / 2, height / 2));
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + width - r, y);
+  ctx.quadraticCurveTo(x + width, y, x + width, y + r);
+  ctx.lineTo(x + width, y + height - r);
+  ctx.quadraticCurveTo(x + width, y + height, x + width - r, y + height);
+  ctx.lineTo(x + r, y + height);
+  ctx.quadraticCurveTo(x, y + height, x, y + height - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
 }
 
 function pickNearestBlock(candidates, sourceLine) {
