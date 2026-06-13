@@ -1,3 +1,3 @@
-"use strict";
+import NoteDrawPlugin from "./notedraw-plugin.js";
 
-module.exports = require("./notedraw-plugin");
+export default NoteDrawPlugin;

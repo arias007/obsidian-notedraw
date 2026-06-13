@@ -12,7 +12,7 @@
 }
 
 .notedraw-header-button {
-  border-radius: 999px !important;
+  border-radius: 999px;
 }
 
 .notedraw-fallback-button {
@@ -153,8 +153,8 @@
 
 .notedraw-toolbar button svg,
 .notedraw-toolbar button .svg-icon {
-  width: 20px !important;
-  height: 20px !important;
+  width: 20px;
+  height: 20px;
   min-width: 20px;
   min-height: 20px;
   stroke-width: 1.7;
@@ -286,8 +286,13 @@
   border-color: color-mix(in srgb, var(--interactive-accent) 35%, var(--background-modifier-border));
 }
 
-.notedraw-shell.is-notedraw-source-shell .notedraw-text-panel {
-  display: none !important;
+.notedraw-shell.is-notedraw-source-shell .notedraw-text-panel,
+.notedraw-shell.is-notedraw-source-shell.is-drawing-active.is-text-panel-open .notedraw-text-panel {
+  display: none;
+}
+
+.notedraw-canvas.notedraw-canvas-pass-through {
+  pointer-events: none;
 }
 
 .notedraw-palette-row {

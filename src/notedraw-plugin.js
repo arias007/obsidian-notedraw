@@ -1,6 +1,4 @@
-"use strict";
-
-const {
+import {
   MarkdownView,
   Notice,
   Plugin,
@@ -8,7 +6,7 @@ const {
   Setting,
   normalizePath,
   setIcon,
-} = require("obsidian");
+} from "obsidian";
 
 const PLUGIN_ID = "notedraw";
 const DRAWING_DIR = `${PLUGIN_ID}/drawings`;
@@ -108,7 +106,7 @@ class NoteDrawPlugin extends Plugin {
     cleanupAllDrawingHeaderButtons();
 
     this.addCommand({
-      id: "toggle-notedraw",
+      id: "toggle",
       name: "Toggle preview edit and drawing mode",
       callback: () => this.toggleActiveController(),
     });
@@ -1850,10 +1848,9 @@ class PreviewDrawingController {
   }
 
   elementBelowCanvas(clientX, clientY) {
-    const previous = this.canvas.style.pointerEvents;
-    this.canvas.style.pointerEvents = "none";
+    this.canvas.addClass("notedraw-canvas-pass-through");
     const target = document.elementFromPoint(clientX, clientY);
-    this.canvas.style.pointerEvents = previous;
+    this.canvas.removeClass("notedraw-canvas-pass-through");
     return target;
   }
 
@@ -2186,10 +2183,12 @@ class PreviewDrawingController {
       },
     });
     textarea.value = isTextStroke(existing) ? existing.text : "";
-    textarea.style.color = isTextStroke(existing) ? existing.color : (this.currentBrushSettings().color || this.penColor);
-    textarea.style.fontSize = `${isTextStroke(existing) ? clamp(Number(existing.fontSize || 18), 10, 72) : 18}px`;
-    textarea.style.fontWeight = isTextStroke(existing) && existing.bold ? "700" : "400";
-    textarea.style.fontFamily = isTextStroke(existing) && existing.code ? "monospace" : "sans-serif";
+    textarea.setCssStyles({
+      color: isTextStroke(existing) ? existing.color : (this.currentBrushSettings().color || this.penColor),
+      fontSize: `${isTextStroke(existing) ? clamp(Number(existing.fontSize || 18), 10, 72) : 18}px`,
+      fontWeight: isTextStroke(existing) && existing.bold ? "700" : "400",
+      fontFamily: isTextStroke(existing) && existing.code ? "monospace" : "sans-serif",
+    });
 
     const state = {
       element: textarea,
@@ -2209,11 +2208,15 @@ class PreviewDrawingController {
 
     const place = () => this.placeFloatingTextInput(textarea, state.anchorClientPoint);
     const resize = () => {
-      textarea.style.height = "auto";
-      textarea.style.width = "auto";
+      textarea.setCssStyles({
+        height: "auto",
+        width: "auto",
+      });
       const centeredWidth = Math.min(Math.max(minEditorWidth, textarea.scrollWidth + 8, 180), Math.max(180, this.canvasWidth() - 24));
-      textarea.style.width = `${centeredWidth}px`;
-      textarea.style.height = `${Math.max(32, textarea.scrollHeight + 4)}px`;
+      textarea.setCssStyles({
+        width: `${centeredWidth}px`,
+        height: `${Math.max(32, textarea.scrollHeight + 4)}px`,
+      });
       place();
     };
 
@@ -2302,8 +2305,10 @@ class PreviewDrawingController {
     const targetY = anchorClientPoint.y;
     const clientX = clamp(targetX, minClientX, maxClientX);
     const clientY = clamp(targetY, minClientY, maxClientY);
-    textarea.style.left = `${Math.max(0, Math.round(clientX))}px`;
-    textarea.style.top = `${Math.max(0, Math.round(clientY))}px`;
+    textarea.setCssStyles({
+      left: `${Math.max(0, Math.round(clientX))}px`,
+      top: `${Math.max(0, Math.round(clientY))}px`,
+    });
   }
 
   commitFloatingTextInput(state = this.floatingTextInput) {
@@ -3506,8 +3511,6 @@ class PreviewDrawingController {
   }
 }
 
-module.exports = NoteDrawPlugin;
-
 class NoteDrawSettingTab extends PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
@@ -3517,7 +3520,9 @@ class NoteDrawSettingTab extends PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h2", { text: "NoteDraw" });
+    new Setting(containerEl)
+      .setName("NoteDraw")
+      .setHeading();
 
     this.renderSettings();
 
@@ -3545,7 +3550,6 @@ class NoteDrawSettingTab extends PluginSettingTab {
       .addSlider((component) => component
         .setLimits(MIN_BRUSH_WIDTH, MAX_BRUSH_WIDTH, 0.5)
         .setValue(settings.defaultPenWidth)
-        .setDynamicTooltip()
         .onChange(async (value) => {
           this.plugin.settings.defaultPenWidth = value;
           await this.plugin.saveSettings();
@@ -3557,7 +3561,6 @@ class NoteDrawSettingTab extends PluginSettingTab {
       .addSlider((component) => component
         .setLimits(0, 1, 0.02)
         .setValue(settings.defaultPenOpacity)
-        .setDynamicTooltip()
         .onChange(async (value) => {
           this.plugin.settings.defaultPenOpacity = value;
           await this.plugin.saveSettings();
@@ -3579,7 +3582,6 @@ class NoteDrawSettingTab extends PluginSettingTab {
       .addSlider((component) => component
         .setLimits(MIN_BRUSH_WIDTH, MAX_BRUSH_WIDTH, 0.5)
         .setValue(settings.defaultWatercolorWidth)
-        .setDynamicTooltip()
         .onChange(async (value) => {
           this.plugin.settings.defaultWatercolorWidth = value;
           await this.plugin.saveSettings();
@@ -3591,7 +3593,6 @@ class NoteDrawSettingTab extends PluginSettingTab {
       .addSlider((component) => component
         .setLimits(0, 1, 0.02)
         .setValue(settings.defaultWatercolorOpacity)
-        .setDynamicTooltip()
         .onChange(async (value) => {
           this.plugin.settings.defaultWatercolorOpacity = value;
           await this.plugin.saveSettings();
@@ -3599,11 +3600,10 @@ class NoteDrawSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Toolbar top offset")
-      .setDesc("Extra pixels below the Obsidian header.")
+      .setDesc("Extra pixels below the view header.")
       .addSlider((component) => component
         .setLimits(0, 48, 1)
         .setValue(settings.toolbarTopOffset)
-        .setDynamicTooltip()
         .onChange(async (value) => {
           this.plugin.settings.toolbarTopOffset = value;
           await this.plugin.saveSettings();
@@ -3764,26 +3764,28 @@ function rangeFromClientPoint(element, clientPoint) {
 
   let range = null;
   const overlay = element.closest(".notedraw-shell")?.querySelector(".notedraw-canvas");
-  const previousPointerEvents = overlay?.style.pointerEvents;
 
   try {
     if (overlay) {
-      overlay.style.pointerEvents = "none";
+      overlay.addClass("notedraw-canvas-pass-through");
     }
 
-    if (typeof document.caretRangeFromPoint === "function") {
-      range = document.caretRangeFromPoint(clientPoint.x, clientPoint.y);
-    } else if (typeof document.caretPositionFromPoint === "function") {
+    if (typeof document.caretPositionFromPoint === "function") {
       const position = document.caretPositionFromPoint(clientPoint.x, clientPoint.y);
       if (position?.offsetNode) {
         range = document.createRange();
         range.setStart(position.offsetNode, position.offset);
         range.collapse(true);
       }
+    } else {
+      const legacyCaretRangeFromPoint = document["caretRangeFromPoint"];
+      if (typeof legacyCaretRangeFromPoint === "function") {
+        range = legacyCaretRangeFromPoint.call(document, clientPoint.x, clientPoint.y);
+      }
     }
   } finally {
     if (overlay) {
-      overlay.style.pointerEvents = previousPointerEvents || "";
+      overlay.removeClass("notedraw-canvas-pass-through");
     }
   }
 
@@ -3854,11 +3856,6 @@ function scoreRectDistance(rect, point) {
     ? rect.left - point.x
     : point.x > rect.right
       ? point.x - rect.right
-      : 0;
-  const yDistance = point.y < rect.top
-    ? rect.top - point.y
-    : point.y > rect.bottom
-      ? point.y - rect.bottom
       : 0;
   const centerY = rect.top + rect.height / 2;
   const sameLineBonus = point.y >= rect.top - 2 && point.y <= rect.bottom + 2 ? 0 : 100000;
@@ -4095,10 +4092,9 @@ function dispatchMouseClickThroughOverlay(canvas, clientPoint) {
     return false;
   }
 
-  const previousPointerEvents = canvas.style.pointerEvents;
-  canvas.style.pointerEvents = "none";
+  canvas.addClass("notedraw-canvas-pass-through");
   const target = document.elementFromPoint(clientPoint.x, clientPoint.y);
-  canvas.style.pointerEvents = previousPointerEvents;
+  canvas.removeClass("notedraw-canvas-pass-through");
 
   if (!target) {
     return false;
@@ -4118,6 +4114,8 @@ function dispatchMouseClickThroughOverlay(canvas, clientPoint) {
   target.dispatchEvent(new MouseEvent("click", { ...eventInit, buttons: 0 }));
   return true;
 }
+
+export default NoteDrawPlugin;
 
 function isEmbeddedPreview(preview) {
   return Boolean(preview.closest(".markdown-embed, .markdown-embed-content, .internal-embed, .external-embed"));

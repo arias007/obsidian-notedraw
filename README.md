@@ -1,6 +1,6 @@
 # NoteDraw
 
-NoteDraw is an Obsidian plugin for editing rendered note text and drawing directly on notes.
+NoteDraw is a plugin for editing rendered note text and drawing directly on notes.
 
 It is built as a note-surface layer: the same drawing and text-edit logic can be reused on Obsidian reading view, source view, and future Obsidian web surfaces.
 
@@ -191,4 +191,4 @@ The current package focuses on the local Obsidian plugin runtime. The API and DO
 
 ## Version
 
-Current version: `0.2.9`.
+Current version: `0.2.32`.
