@@ -1,0 +1,69 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "[0-9]*.[0-9]*.[0-9]*"
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  release:
+    name: Build, attest, and publish
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify release version
+        run: |
+          node - <<'NODE'
+          const fs = require("fs");
+          const tag = process.env.GITHUB_REF_NAME;
+          const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+          const manifest = JSON.parse(fs.readFileSync("manifest.json", "utf8"));
+          if (pkg.version !== tag || manifest.version !== tag) {
+            console.error(`Version mismatch: tag=${tag}, package=${pkg.version}, manifest=${manifest.version}`);
+            process.exit(1);
+          }
+          NODE
+
+      - name: Build plugin
+        run: npm run verify
+
+      - name: Stage release assets
+        run: |
+          mkdir -p release
+          cp main.js styles.css manifest.json release/
+          (cd release && sha256sum main.js styles.css manifest.json) | tee release/SHA256SUMS.txt
+
+      - name: Generate artifact attestations
+        uses: actions/attest-build-provenance@v4.1.0
+        with:
+          subject-checksums: release/SHA256SUMS.txt
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            release/main.js \
+            release/styles.css \
+            release/manifest.json \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "NoteDraw $GITHUB_REF_NAME" \
+            --notes "NoteDraw $GITHUB_REF_NAME release assets built and attested by GitHub Actions."
