@@ -5140,5 +5140,5 @@ function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
 
-/* eslint-enable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-return */
+/* eslint-enable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-return -- Re-enable the unsafe TypeScript checks after the JavaScript implementation section that must access dynamic Obsidian, DOM, and CodeMirror objects. */
 
