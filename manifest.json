@@ -1,8 +1,8 @@
 {
   "id": "notedraw",
   "name": "NoteDraw",
-  "version": "0.2.35",
-  "minAppVersion": "1.13.1",
+  "version": "0.2.36",
+  "minAppVersion": "1.12.7",
   "description": "Draw and edit directly on notes.",
   "author": "Codex",
   "authorUrl": "",

@@ -30,6 +30,7 @@ var DRAWING_DIR = `${PLUGIN_ID}/drawings`;
 var LEGACY_PLUGIN_ID = "note-doodle-preview";
 var LEGACY_DRAWING_DIR = `${LEGACY_PLUGIN_ID}/doodles`;
 var DEBUG_LOG_FILE = "debug-log.jsonl";
+var activeDocument = typeof window !== "undefined" && window.document ? window.document : null;
 var DEBUG_LOG_LIMIT = 150;
 var TEXT_SAVE_DELAY_MS = 160;
 var LONG_PRESS_MS = 550;
@@ -187,7 +188,7 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
     for (const controller of this.sourceControllers.values()) {
       controllers.push(controller);
     }
-    import_obsidian.activeDocument.querySelectorAll(".notedraw-shell").forEach((element) => {
+    activeDocument.querySelectorAll(".notedraw-shell").forEach((element) => {
       const controller = element._noteDrawController;
       if (controller?.plugin === this && !controllers.includes(controller)) {
         controllers.push(controller);
@@ -316,7 +317,7 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
       }
       if (!button) {
         const actions = view?.containerEl?.querySelector(".view-actions");
-        button = import_obsidian.activeDocument.createElement("div");
+        button = activeDocument.createElement("div");
         button.classList.add("clickable-icon", "view-action");
         (0, import_obsidian.setIcon)(button, "wand-sparkles");
         button.addEventListener("click", state.clickHandler);
@@ -804,7 +805,7 @@ var PreviewDrawingController = class {
     this.renderFrameId = null;
     this.resizeFrameId = null;
     this.positionFrameId = null;
-    this.staticCanvas = import_obsidian.activeDocument.createElement("canvas");
+    this.staticCanvas = activeDocument.createElement("canvas");
     this.staticCtx = null;
     this.staticCacheDirty = true;
     this.scrollEventTarget = null;
@@ -943,7 +944,7 @@ var PreviewDrawingController = class {
     this.canvas.addEventListener("dblclick", this.onCanvasDoubleClick);
     this.canvas.addEventListener("wheel", this.onWheel, { passive: true });
     window.addEventListener("resize", this.onResize);
-    import_obsidian.activeDocument.addEventListener("pointerdown", this.onDocumentPointerDown, true);
+    activeDocument.addEventListener("pointerdown", this.onDocumentPointerDown, true);
     if (typeof ResizeObserver !== "undefined") {
       this.resizeObserver = new ResizeObserver(this.onResize);
       this.resizeObserver.observe(this.previewEl);
@@ -1041,7 +1042,7 @@ var PreviewDrawingController = class {
     this.scrollEventTarget = null;
     this.layoutMeasureEl = null;
     window.removeEventListener("resize", this.onResize);
-    import_obsidian.activeDocument.removeEventListener("pointerdown", this.onDocumentPointerDown, true);
+    activeDocument.removeEventListener("pointerdown", this.onDocumentPointerDown, true);
     this.canvas?.removeEventListener("pointerdown", this.onPointerDown);
     this.canvas?.removeEventListener("pointermove", this.onPointerMove);
     this.canvas?.removeEventListener("pointerup", this.onPointerUp);
@@ -1605,7 +1606,7 @@ var PreviewDrawingController = class {
   }
   elementBelowCanvas(clientX, clientY) {
     this.canvas.addClass("notedraw-canvas-pass-through");
-    const target = import_obsidian.activeDocument.elementFromPoint(clientX, clientY);
+    const target = activeDocument.elementFromPoint(clientX, clientY);
     this.canvas.removeClass("notedraw-canvas-pass-through");
     return target;
   }
@@ -1960,7 +1961,7 @@ var PreviewDrawingController = class {
     });
   }
   createFloatingTextScrollLock() {
-    const scroller = findScrollableAncestor(this.previewEl) || import_obsidian.activeDocument.scrollingElement;
+    const scroller = findScrollableAncestor(this.previewEl) || activeDocument.scrollingElement;
     if (!scroller) {
       return null;
     }
@@ -3172,10 +3173,10 @@ function rangeFromClientPoint(element, clientPoint) {
     if (overlay) {
       overlay.addClass("notedraw-canvas-pass-through");
     }
-    if (typeof import_obsidian.activeDocument.caretPositionFromPoint === "function") {
-      const position = import_obsidian.activeDocument.caretPositionFromPoint(clientPoint.x, clientPoint.y);
+    if (typeof activeDocument.caretPositionFromPoint === "function") {
+      const position = activeDocument.caretPositionFromPoint(clientPoint.x, clientPoint.y);
       if (position?.offsetNode) {
-        range = import_obsidian.activeDocument.createRange();
+        range = activeDocument.createRange();
         range.setStart(position.offsetNode, position.offset);
         range.collapse(true);
       }
@@ -3192,7 +3193,7 @@ function rangeFromClientPoint(element, clientPoint) {
   return range;
 }
 function nearestTextRangeFromPoint(element, clientPoint) {
-  const walker = import_obsidian.activeDocument.createTreeWalker(
+  const walker = activeDocument.createTreeWalker(
     element,
     NodeFilter.SHOW_TEXT,
     {
@@ -3207,7 +3208,7 @@ function nearestTextRangeFromPoint(element, clientPoint) {
   while (node) {
     const value = node.nodeValue || "";
     for (let offset = 0; offset < value.length; offset += 1) {
-      const charRange = import_obsidian.activeDocument.createRange();
+      const charRange = activeDocument.createRange();
       charRange.setStart(node, offset);
       charRange.setEnd(node, offset + 1);
       for (const rect of Array.from(charRange.getClientRects())) {
@@ -3217,7 +3218,7 @@ function nearestTextRangeFromPoint(element, clientPoint) {
         const score = scoreRectDistance(rect, clientPoint);
         if (score < bestScore) {
           const caretOffset = clientPoint.x > rect.left + rect.width / 2 ? offset + 1 : offset;
-          const caretRange = import_obsidian.activeDocument.createRange();
+          const caretRange = activeDocument.createRange();
           caretRange.setStart(node, caretOffset);
           caretRange.collapse(true);
           best = caretRange;
@@ -3241,7 +3242,7 @@ function scoreRectDistance(rect, point) {
   return sameLineBonus + linePenalty + inlinePenalty;
 }
 function rangeAtEditableEnd(element) {
-  const range = import_obsidian.activeDocument.createRange();
+  const range = activeDocument.createRange();
   range.selectNodeContents(element);
   range.collapse(false);
   return range;
@@ -3411,7 +3412,7 @@ function dispatchMouseClickThroughOverlay(canvas, clientPoint) {
     return false;
   }
   canvas.addClass("notedraw-canvas-pass-through");
-  const target = import_obsidian.activeDocument.elementFromPoint(clientPoint.x, clientPoint.y);
+  const target = activeDocument.elementFromPoint(clientPoint.x, clientPoint.y);
   canvas.removeClass("notedraw-canvas-pass-through");
   if (!target) {
     return false;
@@ -3435,7 +3436,7 @@ function isEmbeddedPreview(preview) {
   return Boolean(preview.closest(".markdown-embed, .markdown-embed-content, .internal-embed, .external-embed"));
 }
 function cleanupAllDrawingHeaderButtons() {
-  import_obsidian.activeDocument.querySelectorAll(".notedraw-header-button").forEach((button) => button.remove());
+  activeDocument.querySelectorAll(".notedraw-header-button").forEach((button) => button.remove());
 }
 function cleanupDrawingUi(preview) {
   preview.querySelectorAll(".notedraw-button, .notedraw-fallback-button, .notedraw-toolbar, .notedraw-palette-panel, .notedraw-text-panel, .notedraw-canvas").forEach((element) => element.remove());
@@ -3977,11 +3978,11 @@ function getScrollEventTarget(scroller) {
   if (!scroller) {
     return window;
   }
-  return scroller === import_obsidian.activeDocument.documentElement || scroller === import_obsidian.activeDocument.body ? window : scroller;
+  return scroller === activeDocument.documentElement || scroller === activeDocument.body ? window : scroller;
 }
 function findScrollableAncestor(element) {
   let current = element;
-  while (current && current !== import_obsidian.activeDocument.body && current !== import_obsidian.activeDocument.documentElement) {
+  while (current && current !== activeDocument.body && current !== activeDocument.documentElement) {
     const style = window.getComputedStyle(current);
     const canScrollY = /(auto|scroll|overlay)/.test(style.overflowY) && current.scrollHeight > current.clientHeight;
     const canScrollX = /(auto|scroll|overlay)/.test(style.overflowX) && current.scrollWidth > current.clientWidth;
@@ -3990,7 +3991,7 @@ function findScrollableAncestor(element) {
     }
     current = current.parentElement;
   }
-  return import_obsidian.activeDocument.scrollingElement || import_obsidian.activeDocument.documentElement;
+  return activeDocument.scrollingElement || activeDocument.documentElement;
 }
 function pointDistanceOnCanvas(a, b, width, height) {
   return Math.hypot(

@@ -4,7 +4,6 @@ import {
   Plugin,
   PluginSettingTab,
   Setting,
-  activeDocument,
   normalizePath,
   setIcon,
 } from "obsidian";
@@ -16,6 +15,7 @@ const DRAWING_DIR = `${PLUGIN_ID}/drawings`;
 const LEGACY_PLUGIN_ID = "note-doodle-preview";
 const LEGACY_DRAWING_DIR = `${LEGACY_PLUGIN_ID}/doodles`;
 const DEBUG_LOG_FILE = "debug-log.jsonl";
+const activeDocument = typeof window !== "undefined" && window.document ? window.document : null;
 const DEBUG_LOG_LIMIT = 150;
 const TEXT_SAVE_DELAY_MS = 160;
 const LONG_PRESS_MS = 550;
