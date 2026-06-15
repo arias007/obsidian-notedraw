@@ -287,7 +287,7 @@ var NoteDrawPlugin = class extends Plugin {
   }
   createPublicApi() {
     return {
-      version: "3.1",
+      version: "3.1.5",
       getActiveController: () => this.getActiveController(),
       readDrawings: async (file) => this.readDrawings(file),
       writeDrawings: async (file, data) => this.writeDrawings(file, normalizeDrawingData(data, file)),
@@ -295,6 +295,7 @@ var NoteDrawPlugin = class extends Plugin {
         current: this.drawingPathForFile(file),
         legacy: this.legacyDrawingPathForFile(file)
       }),
+      injectExportSnapshot: async (file, container) => this.injectExportSnapshot(file, container),
       replaceSelectionText: async (file, originalText, editedText) => {
         if (!file) {
           return { changed: false, reason: "missing-file" };
@@ -639,13 +640,26 @@ var NoteDrawPlugin = class extends Plugin {
     await this.app.vault.adapter.writeBinary(targetPath, buffer);
     const mime = fileLike.type || guessMimeType(originalName);
     const text = isTextAssetMime(originalName, mime) && typeof fileLike.text === "function" ? await fileLike.text() : "";
+    const imageDataUrl = isImageAssetMime(originalName, mime) ? arrayBufferToDataUrl(buffer, mime) : "";
     return {
       path: targetPath,
       name: originalName,
       mime,
       size: Number(fileLike.size || buffer.byteLength || 0),
-      text
+      text,
+      imageDataUrl
     };
+  }
+  async assetDataUrl(assetPath, mime = "") {
+    if (!assetPath) {
+      return "";
+    }
+    try {
+      const buffer = await this.app.vault.adapter.readBinary(normalizeVaultPath(assetPath));
+      return arrayBufferToDataUrl(buffer, mime || guessMimeType(assetPath));
+    } catch (_) {
+      return "";
+    }
   }
   async appendDebugLog(entry) {
     if (!this.settings?.enableDebugLog) {
@@ -714,6 +728,183 @@ var NoteDrawPlugin = class extends Plugin {
       updatedAt: (/* @__PURE__ */ new Date()).toISOString()
     }, null, 2);
     await this.app.vault.adapter.write(path, body);
+  }
+  async injectExportSnapshot(file, container) {
+    if (!file || !(container instanceof HTMLElement)) {
+      return null;
+    }
+    const liveLayer = container.querySelector(".notedraw-embed-layer");
+    if (liveLayer instanceof HTMLElement) {
+      const liveDrawingData = container._noteDrawController?.drawingData || null;
+      await this.injectExportImageCanvasLayer(file, container, liveDrawingData);
+      await prepareExportImages(liveLayer);
+      await this.replaceExportVideos(liveLayer);
+      return liveLayer;
+    }
+    container.querySelectorAll(".notedraw-export-snapshot-layer").forEach((element) => element.remove());
+    const drawingData = await this.readDrawings(file);
+    const strokes = Array.isArray(drawingData?.strokes) ? drawingData.strokes : [];
+    const exportable = strokes.filter((stroke) => isEmbedStroke(stroke) || isRichTextStroke(stroke));
+    if (!exportable.length) {
+      return null;
+    }
+    const rect = container.getBoundingClientRect();
+    const width = Math.max(1, Math.ceil(container.scrollWidth || rect.width || 1));
+    const height = Math.max(1, Math.ceil(container.scrollHeight || rect.height || 1));
+    if (getComputedStyle(container).position === "static") {
+      applyElementStyles(container, { position: "relative" });
+    }
+    const layer = container.createDiv({ cls: "notedraw-export-snapshot-layer" });
+    applyElementStyles(layer, {
+      width: `${width}px`,
+      height: `${height}px`
+    });
+    const renderer = new NoteDrawExportSnapshotRenderer(this, file, layer, width, height);
+    await renderer.render(exportable);
+    if (!layer.children.length) {
+      layer.remove();
+      return null;
+    }
+    await prepareExportImages(layer);
+    await this.replaceExportVideos(layer);
+    return layer;
+  }
+  async injectExportImageCanvasLayer(file, container, drawingData = null) {
+    container.querySelectorAll(".notedraw-export-image-canvas-layer").forEach((element) => element.remove());
+    const data = drawingData || await this.readDrawings(file);
+    const imageStrokes = (Array.isArray(data?.strokes) ? data.strokes : []).filter(isImageEmbedStroke);
+    if (!imageStrokes.length) {
+      return null;
+    }
+    const rect = container.getBoundingClientRect();
+    const width = Math.max(1, Math.ceil(container.scrollWidth || rect.width || 1));
+    const height = Math.max(1, Math.ceil(container.scrollHeight || rect.height || 1));
+    if (getComputedStyle(container).position === "static") {
+      applyElementStyles(container, { position: "relative" });
+    }
+    const scale = Math.min(2, Math.max(1, Number(window.devicePixelRatio || 1)));
+    const canvas = document.createElement("canvas");
+    canvas.className = "notedraw-export-image-canvas-layer";
+    canvas.width = Math.ceil(width * scale);
+    canvas.height = Math.ceil(height * scale);
+    applyElementStyles(canvas, {
+      position: "absolute",
+      zIndex: "58",
+      top: "0",
+      left: "0",
+      right: "auto",
+      bottom: "auto",
+      width: `${width}px`,
+      height: `${height}px`,
+      pointerEvents: "none",
+      userSelect: "none",
+      background: "transparent"
+    });
+    const context = canvas.getContext("2d");
+    if (!context) {
+      return null;
+    }
+    context.scale(scale, scale);
+    container.appendChild(canvas);
+    let drewImage = false;
+    for (const stroke of imageStrokes) {
+      drewImage = await this.drawExportImageStrokeOn(context, stroke, width, height) || drewImage;
+    }
+    if (!drewImage) {
+      canvas.remove();
+      return null;
+    }
+    window.setTimeout(() => {
+      canvas.remove();
+    }, 3e4);
+    return canvas;
+  }
+  async drawExportImageStrokeOn(context, stroke, width, height) {
+    const bounds = getStrokeBounds(stroke, width, height);
+    if (!bounds) {
+      return false;
+    }
+    const source = normalizeImageDataUrl(stroke.exportImageDataUrl) || await this.assetDataUrl(stroke.assetPath, stroke.assetMime || guessMimeType(stroke.assetName || stroke.assetPath));
+    if (!source) {
+      return false;
+    }
+    const image = await loadExportImage(source, 2200);
+    if (!image?.naturalWidth || !image?.naturalHeight) {
+      return false;
+    }
+    const x = Math.round(bounds.minX);
+    const y = Math.round(bounds.minY);
+    const boxWidth = Math.max(1, Math.round(bounds.maxX - bounds.minX));
+    const boxHeight = Math.max(1, Math.round(bounds.maxY - bounds.minY));
+    const fit = objectFitContain(image.naturalWidth, image.naturalHeight, boxWidth, boxHeight);
+    context.save();
+    context.globalAlpha = clamp(Number(stroke.opacity ?? 1), 0, 1);
+    context.fillStyle = "#fff";
+    context.fillRect(x, y, boxWidth, boxHeight);
+    context.imageSmoothingEnabled = true;
+    context.imageSmoothingQuality = "high";
+    context.drawImage(image, x + fit.x, y + fit.y, fit.width, fit.height);
+    context.restore();
+    return true;
+  }
+  async replaceExportVideos(root) {
+    const videos = Array.from(root.querySelectorAll("video"));
+    let replaced = false;
+    for (const video of videos) {
+      const snapshot = await this.createVideoSnapshot(video).catch((error) => {
+        console.warn(`[${PLUGIN_ID}] Failed to capture export video frame`, error);
+        return null;
+      });
+      if (snapshot) {
+        video.replaceWith(snapshot);
+        replaced = true;
+      }
+    }
+    return replaced;
+  }
+  async createVideoSnapshot(video) {
+    if (!(video instanceof HTMLVideoElement)) {
+      return null;
+    }
+    await waitForMedia(video, 1400).catch(() => null);
+    const rect = video.getBoundingClientRect();
+    const width = Math.max(1, Math.ceil(video.videoWidth || rect.width || video.clientWidth || 320));
+    const height = Math.max(1, Math.ceil(video.videoHeight || rect.height || video.clientHeight || 180));
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    applyElementStyles(canvas, {
+      display: "block",
+      width: "100%",
+      height: "100%",
+      background: "#000"
+    });
+    const context = canvas.getContext("2d");
+    if (!context) {
+      return this.createVideoFallbackCard(video);
+    }
+    try {
+      context.drawImage(video, 0, 0, width, height);
+      return canvas;
+    } catch (_) {
+      return this.createVideoFallbackCard(video);
+    }
+  }
+  createVideoFallbackCard(video) {
+    const card = document.createElement("div");
+    card.className = "notedraw-file-card notedraw-video-fallback";
+    const iconEl = document.createElement("span");
+    iconEl.className = "notedraw-file-icon";
+    setIcon(iconEl, "file-video");
+    card.appendChild(iconEl);
+    const body = document.createElement("div");
+    body.className = "notedraw-file-body";
+    const nameEl = document.createElement("div");
+    nameEl.className = "notedraw-file-name";
+    nameEl.textContent = video.getAttribute("data-filename") || video.getAttribute("title") || "Video";
+    body.appendChild(nameEl);
+    card.appendChild(body);
+    return card;
   }
   getPluginAssetPath(relativePath) {
     const pluginDir = this.manifest.dir ?? `${this.app.vault.configDir}/plugins/${this.manifest.id}`;
@@ -1023,6 +1214,7 @@ var PreviewDrawingController = class {
     this.embedLayer = null;
     this.embedNodes = /* @__PURE__ */ new Map();
     this.embedRenderTokens = /* @__PURE__ */ new Map();
+    this.canvasImageCache = /* @__PURE__ */ new Map();
     this.hiddenFileInput = null;
     this.canvasCssWidth = 1;
     this.canvasCssHeight = 1;
@@ -1268,6 +1460,7 @@ var PreviewDrawingController = class {
     this.embedNodes.forEach((node) => node.remove());
     this.embedNodes.clear();
     this.embedRenderTokens.clear();
+    this.canvasImageCache.clear();
     this.invalidateStaticCache();
     this.drawingsLoaded = false;
     this.loadingDrawings = null;
@@ -2226,6 +2419,7 @@ var PreviewDrawingController = class {
       assetName: asset.name,
       assetMime: asset.mime,
       assetSize: asset.size,
+      exportImageDataUrl: kind === EMBED_IMAGE ? asset.imageDataUrl || "" : "",
       previewWidth: kind === EMBED_FILE ? 260 : 320,
       previewHeight: kind === EMBED_FILE ? 74 : 200,
       points: [{ ...point, t: Date.now() }]
@@ -2855,6 +3049,10 @@ var PreviewDrawingController = class {
     if (!stroke.points.length) {
       return;
     }
+    if (isImageEmbedStroke(stroke)) {
+      this.drawImageStrokeOn(ctx, stroke);
+      return;
+    }
     if (isEmbedStroke(stroke) || isRichTextStroke(stroke)) {
       return;
     }
@@ -2886,6 +3084,59 @@ var PreviewDrawingController = class {
       ctx.stroke();
     }
     ctx.restore();
+  }
+  drawImageStrokeOn(ctx, stroke) {
+    const image = this.getCanvasImageForStroke(stroke);
+    if (!image || !image.complete || !image.naturalWidth || !image.naturalHeight) {
+      return;
+    }
+    const bounds = getStrokeBounds(stroke, this.canvasWidth(), this.canvasHeight());
+    if (!bounds) {
+      return;
+    }
+    const x = Math.round(bounds.minX);
+    const y = Math.round(bounds.minY);
+    const width = Math.max(1, Math.round(bounds.maxX - bounds.minX));
+    const height = Math.max(1, Math.round(bounds.maxY - bounds.minY));
+    const fit = objectFitContain(image.naturalWidth, image.naturalHeight, width, height);
+    ctx.save();
+    ctx.globalAlpha = clamp(Number(stroke.opacity ?? 1), 0, 1);
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(x, y, width, height);
+    ctx.drawImage(image, x + fit.x, y + fit.y, fit.width, fit.height);
+    ctx.restore();
+  }
+  getCanvasImageForStroke(stroke) {
+    const key = getImageStrokeCacheKey(stroke);
+    if (!key) {
+      return null;
+    }
+    const cached = this.canvasImageCache.get(key);
+    if (cached?.image) {
+      return cached.image;
+    }
+    const image = new Image();
+    image.decoding = "sync";
+    image.onload = () => {
+      this.invalidateStaticCache();
+      this.requestRender();
+    };
+    image.onerror = () => {
+      this.canvasImageCache.delete(key);
+    };
+    this.canvasImageCache.set(key, { image });
+    const embedded = normalizeImageDataUrl(stroke.exportImageDataUrl);
+    if (embedded) {
+      image.src = embedded;
+      return image;
+    }
+    this.plugin.assetDataUrl(stroke.assetPath, stroke.assetMime || guessMimeType(stroke.assetName || stroke.assetPath)).then((dataUrl) => {
+      const state = this.canvasImageCache.get(key);
+      if (state?.image === image && dataUrl) {
+        image.src = dataUrl;
+      }
+    });
+    return image;
   }
   drawTextStrokeOn(ctx, stroke, alpha = 1) {
     const text = String(stroke.text || "").trim();
@@ -3316,6 +3567,148 @@ var PreviewDrawingController = class {
   }
 };
 module.exports = NoteDrawPlugin;
+var NoteDrawExportSnapshotRenderer = class {
+  constructor(plugin, file, layer, width, height) {
+    this.plugin = plugin;
+    this.file = file;
+    this.layer = layer;
+    this.width = width;
+    this.height = height;
+  }
+  async render(strokes) {
+    for (const stroke of strokes) {
+      await this.renderStroke(stroke).catch((error) => {
+        console.warn(`[${PLUGIN_ID}] Failed to render export snapshot item`, error);
+      });
+    }
+  }
+  async renderStroke(stroke) {
+    if (!stroke?.points?.length) {
+      return;
+    }
+    const bounds = getStrokeBounds(stroke, this.width, this.height);
+    if (!bounds) {
+      return;
+    }
+    const node = this.layer.createDiv({ cls: "notedraw-export-snapshot-item" });
+    node.toggleClass("is-rich-text", isRichTextStroke(stroke));
+    node.toggleClass("is-asset", isEmbedStroke(stroke));
+    if (stroke.assetPath) {
+      node.setAttribute("data-notedraw-asset-path", stroke.assetPath);
+    }
+    if (stroke.assetName) {
+      node.setAttribute("data-notedraw-asset-name", stroke.assetName);
+    }
+    if (stroke.assetMime) {
+      node.setAttribute("data-notedraw-asset-mime", stroke.assetMime);
+    }
+    applyElementStyles(node, {
+      left: `${Math.round(bounds.minX)}px`,
+      top: `${Math.round(bounds.minY)}px`,
+      width: `${Math.max(32, Math.round(bounds.maxX - bounds.minX))}px`,
+      height: `${Math.max(28, Math.round(bounds.maxY - bounds.minY))}px`,
+      opacity: String(clamp(Number(stroke.opacity ?? 1), 0, 1))
+    });
+    if (isRichTextStroke(stroke)) {
+      await this.renderRichText(node, stroke);
+      return;
+    }
+    if (stroke.embedType === EMBED_IMAGE) {
+      await this.renderImage(node, stroke);
+      return;
+    }
+    if (stroke.embedType === EMBED_VIDEO) {
+      node.createEl("video", {
+        attr: {
+          src: this.assetResourceUrl(stroke.assetPath),
+          title: stroke.assetName || "Video",
+          "data-filename": stroke.assetName || "",
+          preload: "metadata",
+          muted: "true",
+          playsinline: "true"
+        }
+      });
+      return;
+    }
+    this.renderFileCard(node, stroke);
+  }
+  async renderImage(node, stroke) {
+    const image = node.createEl("img", {
+      attr: {
+        alt: stroke.assetName || "Image",
+        decoding: "sync",
+        loading: "eager",
+        src: await this.assetImageSource(stroke)
+      }
+    });
+    await waitForImage(image, 1800).catch(() => null);
+    const canvas = createExportImageCanvas(image);
+    if (canvas) {
+      image.replaceWith(canvas);
+      return;
+    }
+    await prepareExportImage(image);
+  }
+  async renderRichText(node, stroke) {
+    const renderMode = normalizeTextRenderMode(stroke.render);
+    const content = String(stroke.text || "");
+    if (renderMode === TEXT_RENDER_HTML) {
+      node.appendChild(sanitizeHTMLToDomSafe(content));
+      await prepareExportImages(node);
+      return;
+    }
+    if (renderMode === TEXT_RENDER_NOTE) {
+      const noteContent = await this.resolveNotePreviewContent(content);
+      await MarkdownRenderer.render(this.plugin.app, noteContent, node, this.file.path, this.plugin);
+      await prepareExportImages(node);
+      return;
+    }
+    await MarkdownRenderer.render(this.plugin.app, content, node, this.file.path, this.plugin);
+    await prepareExportImages(node);
+  }
+  renderFileCard(node, stroke) {
+    const fileCard = node.createDiv({ cls: "notedraw-file-card" });
+    const iconEl = fileCard.createSpan({ cls: "notedraw-file-icon" });
+    setIcon(iconEl, "paperclip");
+    const body = fileCard.createDiv({ cls: "notedraw-file-body" });
+    body.createDiv({ cls: "notedraw-file-name", text: stroke.assetName || stroke.text || "Attachment" });
+    body.createDiv({ cls: "notedraw-file-meta", text: formatBytes(stroke.assetSize) });
+  }
+  async resolveNotePreviewContent(text) {
+    const link = String(text || "").trim();
+    const normalized = unwrapWikiLink(link);
+    const file = this.plugin.app.metadataCache.getFirstLinkpathDest(normalized, this.file.path) || this.plugin.app.vault.getFileByPath(normalizePath(normalized));
+    if (!file) {
+      return `> ${link || "Note not found"}`;
+    }
+    return this.plugin.app.vault.cachedRead(file);
+  }
+  assetResourceUrl(assetPath) {
+    if (!assetPath) {
+      return "";
+    }
+    try {
+      return this.plugin.app.vault.adapter.getResourcePath(normalizeVaultPath(assetPath));
+    } catch (_) {
+      return "";
+    }
+  }
+  async assetImageSource(stroke) {
+    const dataUrl = await this.assetDataUrl(stroke.assetPath, stroke.assetMime || guessMimeType(stroke.assetName || stroke.assetPath));
+    return dataUrl || this.assetResourceUrl(stroke.assetPath);
+  }
+  async assetDataUrl(assetPath, mime) {
+    if (!assetPath) {
+      return "";
+    }
+    try {
+      const buffer = await this.plugin.app.vault.adapter.readBinary(normalizeVaultPath(assetPath));
+      return `data:${mime || "image/png"};base64,${arrayBufferToBase64(buffer)}`;
+    } catch (_) {
+      return "";
+    }
+  }
+};
 var NoteDrawSettingTab = class extends PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
@@ -3839,6 +4232,190 @@ function applyElementStyles(element, styles) {
     element.style[key] = value;
   }
 }
+async function prepareExportImages(root) {
+  const images = root instanceof HTMLImageElement ? [root] : Array.from(root?.querySelectorAll?.("img") || []);
+  for (const image of images) {
+    await prepareExportImage(image);
+  }
+}
+async function prepareExportImage(image) {
+  if (!(image instanceof HTMLImageElement)) {
+    return;
+  }
+  image.removeAttribute("srcset");
+  image.setAttribute("decoding", "sync");
+  image.setAttribute("loading", "eager");
+  await waitForImage(image, 1800).catch(() => null);
+  if (!image.naturalWidth || !image.naturalHeight) {
+    return;
+  }
+  const flattened = flattenImageOnWhite(image);
+  if (flattened) {
+    await waitForImage(image, 800).catch(() => null);
+  }
+}
+function flattenImageOnWhite(image) {
+  try {
+    const width = Math.max(1, image.naturalWidth || image.width);
+    const height = Math.max(1, image.naturalHeight || image.height);
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d");
+    if (!context) {
+      return false;
+    }
+    context.fillStyle = "#fff";
+    context.fillRect(0, 0, width, height);
+    context.drawImage(image, 0, 0, width, height);
+    image.src = canvas.toDataURL("image/png");
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+function createExportImageCanvas(image) {
+  try {
+    const width = Math.max(1, image.naturalWidth || image.width);
+    const height = Math.max(1, image.naturalHeight || image.height);
+    if (!width || !height) {
+      return null;
+    }
+    const canvas = document.createElement("canvas");
+    canvas.className = "notedraw-export-image-canvas";
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d");
+    if (!context) {
+      return null;
+    }
+    context.fillStyle = "#fff";
+    context.fillRect(0, 0, width, height);
+    context.drawImage(image, 0, 0, width, height);
+    applyElementStyles(canvas, {
+      display: "block",
+      width: "100%",
+      height: "100%",
+      background: "#fff"
+    });
+    return canvas;
+  } catch (_) {
+    return null;
+  }
+}
+function loadExportImage(src, timeoutMs) {
+  if (!src) {
+    return Promise.resolve(null);
+  }
+  return new Promise((resolve) => {
+    const image = new Image();
+    let timer = 0;
+    const cleanup = () => {
+      window.clearTimeout(timer);
+      image.removeEventListener("load", done);
+      image.removeEventListener("error", fail);
+    };
+    const done = () => {
+      cleanup();
+      resolve(image);
+    };
+    const fail = () => {
+      cleanup();
+      resolve(null);
+    };
+    image.decoding = "sync";
+    image.loading = "eager";
+    image.addEventListener("load", done, { once: true });
+    image.addEventListener("error", fail, { once: true });
+    timer = window.setTimeout(fail, timeoutMs);
+    image.src = src;
+    if (image.complete && image.naturalWidth > 0 && image.naturalHeight > 0) {
+      done();
+    }
+  });
+}
+function arrayBufferToDataUrl(buffer, mime) {
+  return `data:${mime || "image/png"};base64,${arrayBufferToBase64(buffer)}`;
+}
+function arrayBufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  if (typeof Buffer !== "undefined") {
+    return Buffer.from(bytes).toString("base64");
+  }
+  const chunkSize = 32768;
+  let binary = "";
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    const chunk = bytes.subarray(index, index + chunkSize);
+    binary += String.fromCharCode(...chunk);
+  }
+  return btoa(binary);
+}
+function normalizeImageDataUrl(value) {
+  const text = typeof value === "string" ? value.trim() : "";
+  return /^data:image\/[a-z0-9.+-]+;base64,/i.test(text) ? text : "";
+}
+function getImageStrokeCacheKey(stroke) {
+  if (!isImageEmbedStroke(stroke)) {
+    return "";
+  }
+  const dataLength = stroke.exportImageDataUrl ? String(stroke.exportImageDataUrl).length : 0;
+  return [stroke.assetPath || "", stroke.assetName || "", stroke.assetSize || 0, dataLength].join("|");
+}
+function objectFitContain(sourceWidth, sourceHeight, boxWidth, boxHeight) {
+  const scale = Math.min(boxWidth / Math.max(1, sourceWidth), boxHeight / Math.max(1, sourceHeight));
+  const width = Math.max(1, sourceWidth * scale);
+  const height = Math.max(1, sourceHeight * scale);
+  return {
+    x: (boxWidth - width) / 2,
+    y: (boxHeight - height) / 2,
+    width,
+    height
+  };
+}
+function waitForImage(image, timeoutMs) {
+  if (image.complete && image.naturalWidth > 0 && image.naturalHeight > 0) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    let timer = 0;
+    const cleanup = () => {
+      window.clearTimeout(timer);
+      image.removeEventListener("load", done);
+      image.removeEventListener("error", done);
+    };
+    const done = () => {
+      cleanup();
+      resolve();
+    };
+    image.addEventListener("load", done, { once: true });
+    image.addEventListener("error", done, { once: true });
+    timer = window.setTimeout(done, timeoutMs);
+  });
+}
+function waitForMedia(media, timeoutMs) {
+  if (media.readyState >= 2) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    let timer = 0;
+    const cleanup = () => {
+      window.clearTimeout(timer);
+      media.removeEventListener("loadeddata", done);
+      media.removeEventListener("loadedmetadata", done);
+      media.removeEventListener("canplay", done);
+      media.removeEventListener("error", done);
+    };
+    const done = () => {
+      cleanup();
+      resolve();
+    };
+    media.addEventListener("loadeddata", done, { once: true });
+    media.addEventListener("loadedmetadata", done, { once: true });
+    media.addEventListener("canplay", done, { once: true });
+    media.addEventListener("error", done, { once: true });
+    timer = window.setTimeout(done, timeoutMs);
+  });
+}
 function hashString(value) {
   let hash = 2166136261;
   const text = String(value || "");
@@ -4030,6 +4607,11 @@ function classifyImportedAsset(asset) {
   }
   return EMBED_FILE;
 }
+function isImageAssetMime(name, mime) {
+  const lowerName = String(name || "").toLowerCase();
+  const lowerMime = String(mime || "").toLowerCase();
+  return lowerMime.startsWith("image/") || /\.(png|jpe?g|gif|webp|bmp|svg)$/.test(lowerName);
+}
 function classifyImportedPreviewRender(asset) {
   const mime = String(asset?.mime || "").toLowerCase();
   const name = String(asset?.name || "").toLowerCase();
@@ -4100,7 +4682,8 @@ function getEmbedRenderToken(stroke) {
     stroke.text || "",
     stroke.assetPath || "",
     stroke.assetName || "",
-    stroke.assetSize || 0
+    stroke.assetSize || 0,
+    stroke.exportImageDataUrl ? String(stroke.exportImageDataUrl).length : 0
   ].join("|");
 }
 function sanitizeHTMLToDomSafe(content) {
@@ -4169,6 +4752,7 @@ function normalizeStroke(stroke) {
     assetName: typeof stroke?.assetName === "string" ? stroke.assetName : "",
     assetMime: typeof stroke?.assetMime === "string" ? stroke.assetMime : "",
     assetSize: Number.isFinite(Number(stroke?.assetSize)) ? Math.max(0, Number(stroke.assetSize)) : 0,
+    exportImageDataUrl: normalizeImageDataUrl(stroke?.exportImageDataUrl),
     previewWidth: Number.isFinite(Number(stroke?.previewWidth)) ? clamp(Number(stroke.previewWidth), 80, 900) : 260,
     previewHeight: Number.isFinite(Number(stroke?.previewHeight)) ? clamp(Number(stroke.previewHeight), 40, 700) : 160,
     fontSize: Number.isFinite(Number(stroke?.fontSize)) ? clamp(Number(stroke.fontSize), 10, 72) : 18,
@@ -4194,6 +4778,9 @@ function isTextLikeStroke(stroke) {
 }
 function isEmbedStroke(stroke) {
   return stroke?.kind === TOOL_EMBED && Boolean(stroke.assetPath || stroke.text || stroke.assetName);
+}
+function isImageEmbedStroke(stroke) {
+  return stroke?.kind === TOOL_EMBED && normalizeEmbedType(stroke.embedType) === EMBED_IMAGE && Boolean(stroke.assetPath || stroke.exportImageDataUrl);
 }
 function createTextPreset(preset, text, color) {
   const normalized = String(text || "").trim();
