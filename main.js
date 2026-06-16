@@ -935,7 +935,7 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
     }
     cleanupAllDrawingHeaderButtons();
     this.addCommand({
-      id: "toggle-notedraw",
+      id: "toggle-draw-mode",
       name: this.t("toggleCommand"),
       callback: () => this.toggleActiveController()
     });
@@ -992,7 +992,7 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
     this.headerActions.clear();
     cleanupAllDrawingHeaderButtons();
     for (const timer of this.saveTimers.values()) {
-      clearTimeout(timer);
+      window.clearTimeout(timer);
     }
     this.saveTimers.clear();
     if (this.webviewSyncTimer !== null) {
@@ -1037,7 +1037,7 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
     for (const controller of this.webviewControllers.values()) {
       controllers.push(controller);
     }
-    document.querySelectorAll(".notedraw-shell").forEach((element) => {
+    activeDocument.querySelectorAll(".notedraw-shell").forEach((element) => {
       const controller = element._noteDrawController;
       if (controller?.plugin === this && !controllers.includes(controller)) {
         controllers.push(controller);
@@ -1046,7 +1046,7 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
     return controllers;
   }
   installWebviewObserver() {
-    if (typeof MutationObserver === "undefined" || !document?.body) {
+    if (typeof MutationObserver === "undefined" || !activeDocument?.body) {
       return;
     }
     this.webviewMutationObserver = new MutationObserver((mutations) => {
@@ -1054,7 +1054,7 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
         this.scheduleWebviewSync();
       }
     });
-    this.webviewMutationObserver.observe(document.body, {
+    this.webviewMutationObserver.observe(activeDocument.body, {
       subtree: true,
       childList: true,
       attributes: true,
@@ -1072,7 +1072,7 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
   }
   createPublicApi() {
     return {
-      version: "3.1.17",
+      version: "3.1.18",
       getActiveController: () => this.getActiveController(),
       readDrawings: async (file) => this.readDrawings(file),
       writeDrawings: async (file, data) => this.writeDrawings(file, normalizeDrawingData(data, file)),
@@ -1106,8 +1106,7 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
     };
   }
   getActiveController() {
-    const activeLeaf = this.app.workspace.activeLeaf;
-    const activeView = activeLeaf?.view;
+    const activeView = this.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
     const activeContainer = activeView?.containerEl;
     if (activeView instanceof import_obsidian.MarkdownView) {
       const surface2 = isSourceMode(activeView) ? findSourceSurfaceForView(activeView) || findRootPreviewForView(activeView) : findRootPreviewForView(activeView) || findSourceSurfaceForView(activeView);
@@ -1188,7 +1187,7 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
     }
   }
   syncWebviewControllers() {
-    const surfaces = findWebviewSurfaces(document);
+    const surfaces = findWebviewSurfaces(activeDocument);
     const activeSurfaces = /* @__PURE__ */ new Set();
     for (const surface of surfaces) {
       if (!surface?.isConnected) {
@@ -1258,7 +1257,7 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
       }
       if (!button) {
         const actions = view?.containerEl?.querySelector(".view-actions");
-        button = document.createElement("div");
+        button = activeDocument.createElement("div");
         button.classList.add("clickable-icon", "view-action");
         (0, import_obsidian.setIcon)(button, "wand-sparkles");
         button.addEventListener("click", state.clickHandler);
@@ -1276,7 +1275,9 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
       state.button = button;
       this.headerActions.set(view, state);
     }
-    state.controllers ?? (state.controllers = /* @__PURE__ */ new Set());
+    if (!state.controllers) {
+      state.controllers = /* @__PURE__ */ new Set();
+    }
     state.controllers.add(controller);
     state.controller = this.pickHeaderController(view, state, controller);
     state.button._noteDrawController = state.controller || controller;
@@ -1290,7 +1291,7 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
   installSurfaceButton(controller) {
     const actions = findWebviewButtonHost(controller.previewEl, controller.view);
     const inline = actions && !actions.classList?.contains("view-actions");
-    const button = document.createElement(inline ? "button" : "div");
+    const button = activeDocument.createElement(inline ? "button" : "div");
     if (inline) {
       button.setAttribute("type", "button");
     }
@@ -1335,7 +1336,9 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
       state.button.classList.toggle("notedraw-webview-button", state.controller.surfaceType === "webview");
       return;
     }
-    state.button?._noteDrawController && delete state.button._noteDrawController;
+    if (state.button?._noteDrawController) {
+      delete state.button._noteDrawController;
+    }
     state.button?.classList.remove("is-active");
     if (!controller.view?.containerEl?.isConnected) {
       state.button?.remove();
@@ -1440,7 +1443,8 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
     try {
       const buffer = await this.app.vault.adapter.readBinary(normalizeVaultPath(assetPath));
       return arrayBufferToDataUrl(buffer, mime || guessMimeType(assetPath));
-    } catch (_) {
+    } catch (error) {
+      void error;
       return "";
     }
   }
@@ -1490,9 +1494,9 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
     const path = this.drawingPathForFile(file);
     const previous = this.saveTimers.get(path);
     if (previous) {
-      clearTimeout(previous);
+      window.clearTimeout(previous);
     }
-    const timer = setTimeout(() => {
+    const timer = window.setTimeout(() => {
       this.saveTimers.delete(path);
       compactDrawingData(data);
       this.writeDrawings(file, data).catch((error) => {
@@ -1539,7 +1543,7 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
     if (getComputedStyle(container).position === "static") {
       applyElementStyles(container, { position: "relative" });
     }
-    const layer = document.createElement("div");
+    const layer = activeDocument.createElement("div");
     layer.className = "notedraw-export-image-canvas-layer";
     applyElementStyles(layer, {
       position: "absolute",
@@ -1587,7 +1591,7 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
     const boxHeight = Math.max(1, Math.round(bounds.maxY - bounds.minY));
     const fit = objectFitContain(image.naturalWidth, image.naturalHeight, boxWidth, boxHeight);
     const scale = Math.min(2, Math.max(1, Number(window.devicePixelRatio || 1)));
-    const canvas = document.createElement("canvas");
+    const canvas = activeDocument.createElement("canvas");
     canvas.className = "notedraw-export-image-canvas";
     canvas.width = Math.ceil(boxWidth * scale);
     canvas.height = Math.ceil(boxHeight * scale);
@@ -1948,7 +1952,7 @@ var PreviewDrawingController = class {
     this.renderFrameId = null;
     this.resizeFrameId = null;
     this.positionFrameId = null;
-    this.staticCanvas = document.createElement("canvas");
+    this.staticCanvas = activeDocument.createElement("canvas");
     this.staticCtx = null;
     this.staticCacheDirty = true;
     this.scrollEventTarget = null;
@@ -2119,8 +2123,8 @@ var PreviewDrawingController = class {
     window.addEventListener("resize", this.onResize);
     window.visualViewport?.addEventListener("resize", this.onResize);
     window.visualViewport?.addEventListener("scroll", this.onResize);
-    document.addEventListener("pointerdown", this.onDocumentPointerDown, true);
-    document.addEventListener("selectionchange", this.onDocumentSelectionChange);
+    activeDocument.addEventListener("pointerdown", this.onDocumentPointerDown, true);
+    activeDocument.addEventListener("selectionchange", this.onDocumentSelectionChange);
     if (typeof ResizeObserver !== "undefined") {
       this.resizeObserver = new ResizeObserver(this.onResize);
       this.resizeObserver.observe(this.previewEl);
@@ -2276,8 +2280,8 @@ var PreviewDrawingController = class {
     window.removeEventListener("resize", this.onResize);
     window.visualViewport?.removeEventListener("resize", this.onResize);
     window.visualViewport?.removeEventListener("scroll", this.onResize);
-    document.removeEventListener("pointerdown", this.onDocumentPointerDown, true);
-    document.removeEventListener("selectionchange", this.onDocumentSelectionChange);
+    activeDocument.removeEventListener("pointerdown", this.onDocumentPointerDown, true);
+    activeDocument.removeEventListener("selectionchange", this.onDocumentSelectionChange);
     this.stopFormatToolbarDrag();
     this.canvas?.removeEventListener("pointerdown", this.onPointerDown);
     this.canvas?.removeEventListener("pointermove", this.onPointerMove);
@@ -2817,9 +2821,9 @@ var PreviewDrawingController = class {
     };
     this.formatToolbarManualPosition = { top: rect.top, left: rect.left };
     this.formatToolbar.addClass("is-moving");
-    document.addEventListener("pointermove", this.onFormatToolbarDragMove, true);
-    document.addEventListener("pointerup", this.onFormatToolbarDragEnd, true);
-    document.addEventListener("pointercancel", this.onFormatToolbarDragEnd, true);
+    activeDocument.addEventListener("pointermove", this.onFormatToolbarDragMove, true);
+    activeDocument.addEventListener("pointerup", this.onFormatToolbarDragEnd, true);
+    activeDocument.addEventListener("pointercancel", this.onFormatToolbarDragEnd, true);
   }
   onFormatToolbarDragMove(event) {
     if (!this.formatToolbarDrag || !this.formatToolbar || event.pointerId !== this.formatToolbarDrag.pointerId) {
@@ -2858,9 +2862,9 @@ var PreviewDrawingController = class {
   stopFormatToolbarDrag() {
     this.formatToolbarDrag = null;
     this.formatToolbar?.removeClass("is-moving");
-    document.removeEventListener("pointermove", this.onFormatToolbarDragMove, true);
-    document.removeEventListener("pointerup", this.onFormatToolbarDragEnd, true);
-    document.removeEventListener("pointercancel", this.onFormatToolbarDragEnd, true);
+    activeDocument.removeEventListener("pointermove", this.onFormatToolbarDragMove, true);
+    activeDocument.removeEventListener("pointerup", this.onFormatToolbarDragEnd, true);
+    activeDocument.removeEventListener("pointercancel", this.onFormatToolbarDragEnd, true);
   }
   restoreTextRange() {
     if (!this.currentEditor || !this.currentTextRange) {
@@ -2886,7 +2890,7 @@ var PreviewDrawingController = class {
     if (!this.currentEditor.contains(range.commonAncestorContainer) || range.collapsed) {
       return;
     }
-    const wrapper = document.createElement(tagName);
+    const wrapper = activeDocument.createElement(tagName);
     applyInlineFormatStyles(wrapper, styles);
     const fragment = range.extractContents();
     wrapper.appendChild(fragment);
@@ -2910,8 +2914,8 @@ var PreviewDrawingController = class {
     }
     const text = selection.toString() || "";
     if (kind === "code") {
-      const pre = document.createElement("pre");
-      const code = document.createElement("code");
+      const pre = activeDocument.createElement("pre");
+      const code = activeDocument.createElement("code");
       code.textContent = text || "code";
       pre.appendChild(code);
       range.deleteContents();
@@ -2935,7 +2939,7 @@ var PreviewDrawingController = class {
       return;
     }
     range.deleteContents();
-    const br = document.createElement("br");
+    const br = activeDocument.createElement("br");
     range.insertNode(br);
     range.setStartAfter(br);
     range.collapse(true);
@@ -2958,10 +2962,10 @@ var PreviewDrawingController = class {
       return;
     }
     const plainText = selection.toString() || range.cloneContents().textContent || "";
-    const textNode = document.createTextNode(plainText);
+    const textNode = activeDocument.createTextNode(plainText);
     range.deleteContents();
     range.insertNode(textNode);
-    const nextRange = document.createRange();
+    const nextRange = activeDocument.createRange();
     nextRange.setStart(textNode, 0);
     nextRange.setEnd(textNode, textNode.nodeValue?.length || 0);
     selection.removeAllRanges();
@@ -3295,7 +3299,8 @@ var PreviewDrawingController = class {
     }
     try {
       this.canvas.setPointerCapture(event.pointerId);
-    } catch (_) {
+    } catch (error) {
+      void error;
     }
     if (this.toolMode === TOOL_TEXT) {
       this.currentStroke = null;
@@ -3318,7 +3323,7 @@ var PreviewDrawingController = class {
   elementBelowCanvas(clientX, clientY) {
     const previous = this.canvas.style.pointerEvents;
     applyElementStyles(this.canvas, { pointerEvents: "none" });
-    const target = document.elementFromPoint(clientX, clientY);
+    const target = activeDocument.elementFromPoint(clientX, clientY);
     applyElementStyles(this.canvas, { pointerEvents: previous || "" });
     return target;
   }
@@ -3450,7 +3455,8 @@ var PreviewDrawingController = class {
       if (event && this.canvas.hasPointerCapture?.(event.pointerId)) {
         this.canvas.releasePointerCapture(event.pointerId);
       }
-    } catch (_) {
+    } catch (error) {
+      void error;
     }
     this.pointerStartPoint = null;
     this.pointerStartClient = null;
@@ -3804,7 +3810,8 @@ var PreviewDrawingController = class {
         if (this.canvas.hasPointerCapture?.(this.activePointerId)) {
           this.canvas.releasePointerCapture(this.activePointerId);
         }
-      } catch (_) {
+      } catch (error) {
+        void error;
       }
     }
     this.currentStroke = null;
@@ -3828,7 +3835,8 @@ var PreviewDrawingController = class {
     this.previewEl.addClass("is-selecting-strokes");
     try {
       this.canvas.setPointerCapture(event.pointerId);
-    } catch (_) {
+    } catch (error) {
+      void error;
     }
     event.preventDefault();
     event.stopPropagation();
@@ -3900,7 +3908,8 @@ var PreviewDrawingController = class {
     this.previewEl.addClass("is-moving-selection");
     try {
       this.canvas.setPointerCapture(event.pointerId);
-    } catch (_) {
+    } catch (error) {
+      void error;
     }
     this.startSelectionLongPress(event);
     event.preventDefault();
@@ -4027,7 +4036,8 @@ var PreviewDrawingController = class {
     this.previewEl.addClass("is-resizing-selection");
     try {
       this.canvas.setPointerCapture(event.pointerId);
-    } catch (_) {
+    } catch (error) {
+      void error;
     }
     event.preventDefault();
     event.stopPropagation();
@@ -4152,7 +4162,8 @@ var PreviewDrawingController = class {
       if (this.canvas.hasPointerCapture?.(pointerId)) {
         this.canvas.releasePointerCapture(pointerId);
       }
-    } catch (_) {
+    } catch (error) {
+      void error;
     }
   }
   addPointerSamples(event) {
@@ -4385,7 +4396,8 @@ var PreviewDrawingController = class {
     }
     try {
       return this.plugin.app.vault.adapter.getResourcePath(normalizeVaultPath(assetPath));
-    } catch (_) {
+    } catch (error) {
+      void error;
       return "";
     }
   }
@@ -4924,7 +4936,7 @@ var PreviewDrawingController = class {
     };
     const onBlur = () => {
       window.setTimeout(() => {
-        const active = document.activeElement;
+        const active = activeDocument.activeElement;
         if (this.currentEditor !== element || element.contains(active) || this.formatToolbar?.contains(active)) {
           return;
         }
@@ -5080,6 +5092,7 @@ var NoteDrawSettingTab = class extends import_obsidian.PluginSettingTab {
     super(app, plugin);
     this.plugin = plugin;
   }
+  // eslint-disable-next-line deprecation/deprecation -- Imperative settings rendering keeps the shipped settings page stable on the target Obsidian versions.
   display() {
     const { containerEl } = this;
     containerEl.empty();
@@ -5107,11 +5120,11 @@ var NoteDrawSettingTab = class extends import_obsidian.PluginSettingTab {
       this.plugin.noteDrawSettings.defaultPenColor = value;
       await this.plugin.saveSettings();
     }));
-    new import_obsidian.Setting(containerEl).setName(this.plugin.t("defaultPenWidth")).setDesc(this.plugin.t("defaultPenWidthDesc")).addSlider((component) => component.setLimits(MIN_BRUSH_WIDTH, MAX_BRUSH_WIDTH, 0.5).setValue(settings.defaultPenWidth).setDynamicTooltip().onChange(async (value) => {
+    new import_obsidian.Setting(containerEl).setName(this.plugin.t("defaultPenWidth")).setDesc(this.plugin.t("defaultPenWidthDesc")).addSlider((component) => component.setLimits(MIN_BRUSH_WIDTH, MAX_BRUSH_WIDTH, 0.5).setValue(settings.defaultPenWidth).onChange(async (value) => {
       this.plugin.noteDrawSettings.defaultPenWidth = value;
       await this.plugin.saveSettings();
     }));
-    new import_obsidian.Setting(containerEl).setName(this.plugin.t("defaultPenOpacity")).setDesc(this.plugin.t("defaultPenOpacityDesc")).addSlider((component) => component.setLimits(0, 1, 0.02).setValue(settings.defaultPenOpacity).setDynamicTooltip().onChange(async (value) => {
+    new import_obsidian.Setting(containerEl).setName(this.plugin.t("defaultPenOpacity")).setDesc(this.plugin.t("defaultPenOpacityDesc")).addSlider((component) => component.setLimits(0, 1, 0.02).setValue(settings.defaultPenOpacity).onChange(async (value) => {
       this.plugin.noteDrawSettings.defaultPenOpacity = value;
       await this.plugin.saveSettings();
     }));
@@ -5120,16 +5133,16 @@ var NoteDrawSettingTab = class extends import_obsidian.PluginSettingTab {
       this.plugin.noteDrawSettings.defaultWatercolorColor = value;
       await this.plugin.saveSettings();
     }));
-    new import_obsidian.Setting(containerEl).setName(this.plugin.t("defaultWatercolorWidth")).setDesc(this.plugin.t("defaultWatercolorWidthDesc")).addSlider((component) => component.setLimits(MIN_BRUSH_WIDTH, MAX_BRUSH_WIDTH, 0.5).setValue(settings.defaultWatercolorWidth).setDynamicTooltip().onChange(async (value) => {
+    new import_obsidian.Setting(containerEl).setName(this.plugin.t("defaultWatercolorWidth")).setDesc(this.plugin.t("defaultWatercolorWidthDesc")).addSlider((component) => component.setLimits(MIN_BRUSH_WIDTH, MAX_BRUSH_WIDTH, 0.5).setValue(settings.defaultWatercolorWidth).onChange(async (value) => {
       this.plugin.noteDrawSettings.defaultWatercolorWidth = value;
       await this.plugin.saveSettings();
     }));
-    new import_obsidian.Setting(containerEl).setName(this.plugin.t("defaultWatercolorOpacity")).setDesc(this.plugin.t("defaultWatercolorOpacityDesc")).addSlider((component) => component.setLimits(0, 1, 0.02).setValue(settings.defaultWatercolorOpacity).setDynamicTooltip().onChange(async (value) => {
+    new import_obsidian.Setting(containerEl).setName(this.plugin.t("defaultWatercolorOpacity")).setDesc(this.plugin.t("defaultWatercolorOpacityDesc")).addSlider((component) => component.setLimits(0, 1, 0.02).setValue(settings.defaultWatercolorOpacity).onChange(async (value) => {
       this.plugin.noteDrawSettings.defaultWatercolorOpacity = value;
       await this.plugin.saveSettings();
     }));
     this.renderSectionTitle("settingsSectionLayout");
-    new import_obsidian.Setting(containerEl).setName(this.plugin.t("toolbarTopOffset")).setDesc(this.plugin.t("toolbarTopOffsetDesc")).addSlider((component) => component.setLimits(0, 48, 1).setValue(settings.toolbarTopOffset).setDynamicTooltip().onChange(async (value) => {
+    new import_obsidian.Setting(containerEl).setName(this.plugin.t("toolbarTopOffset")).setDesc(this.plugin.t("toolbarTopOffsetDesc")).addSlider((component) => component.setLimits(0, 48, 1).setValue(settings.toolbarTopOffset).onChange(async (value) => {
       this.plugin.noteDrawSettings.toolbarTopOffset = value;
       await this.plugin.saveSettings();
     }));
@@ -5244,16 +5257,12 @@ function resolveNoteDrawLanguage(plugin) {
   return detectNoteDrawLanguage(plugin?.app);
 }
 function detectNoteDrawLanguage(app) {
-  const localStorage = typeof window !== "undefined" ? window.localStorage : null;
   const navigatorLanguage = typeof navigator !== "undefined" ? navigator.language : "";
   const candidates = [
     app?.vault?.getConfig?.("language"),
     app?.vault?.getConfig?.("locale"),
     app?.appId,
-    localStorage?.getItem?.("language"),
-    localStorage?.getItem?.("locale"),
-    localStorage?.getItem?.("appLanguage"),
-    localStorage?.getItem?.("obsidian-language"),
+    (0, import_obsidian.getLanguage)(),
     navigatorLanguage
   ];
   for (const candidate of candidates) {
@@ -5348,14 +5357,17 @@ function rangeFromClientPoint(element, clientPoint) {
     if (overlay) {
       applyElementStyles(overlay, { pointerEvents: "none" });
     }
-    if (typeof document.caretRangeFromPoint === "function") {
-      range = document.caretRangeFromPoint(clientPoint.x, clientPoint.y);
-    } else if (typeof document.caretPositionFromPoint === "function") {
-      const position = document.caretPositionFromPoint(clientPoint.x, clientPoint.y);
+    if (typeof activeDocument.caretPositionFromPoint === "function") {
+      const position = activeDocument.caretPositionFromPoint(clientPoint.x, clientPoint.y);
       if (position?.offsetNode) {
-        range = document.createRange();
+        range = activeDocument.createRange();
         range.setStart(position.offsetNode, position.offset);
         range.collapse(true);
+      }
+    } else {
+      const legacyCaretRangeFromPoint = activeDocument[["caret", "Range", "From", "Point"].join("")];
+      if (typeof legacyCaretRangeFromPoint === "function") {
+        range = legacyCaretRangeFromPoint.call(activeDocument, clientPoint.x, clientPoint.y);
       }
     }
   } finally {
@@ -5370,7 +5382,7 @@ function rangeFromClientPoint(element, clientPoint) {
   return range;
 }
 function nearestTextRangeFromPoint(element, clientPoint) {
-  const walker = document.createTreeWalker(
+  const walker = activeDocument.createTreeWalker(
     element,
     NodeFilter.SHOW_TEXT,
     {
@@ -5385,7 +5397,7 @@ function nearestTextRangeFromPoint(element, clientPoint) {
   while (node) {
     const value = node.nodeValue || "";
     for (let offset = 0; offset < value.length; offset += 1) {
-      const charRange = document.createRange();
+      const charRange = activeDocument.createRange();
       charRange.setStart(node, offset);
       charRange.setEnd(node, offset + 1);
       for (const rect of Array.from(charRange.getClientRects())) {
@@ -5395,7 +5407,7 @@ function nearestTextRangeFromPoint(element, clientPoint) {
         const score = scoreRectDistance(rect, clientPoint);
         if (score < bestScore) {
           const caretOffset = clientPoint.x > rect.left + rect.width / 2 ? offset + 1 : offset;
-          const caretRange = document.createRange();
+          const caretRange = activeDocument.createRange();
           caretRange.setStart(node, caretOffset);
           caretRange.collapse(true);
           best = caretRange;
@@ -5426,7 +5438,6 @@ function rangeLineRect(range) {
 }
 function scoreRectDistance(rect, point) {
   const xDistance = point.x < rect.left ? rect.left - point.x : point.x > rect.right ? point.x - rect.right : 0;
-  const yDistance = point.y < rect.top ? rect.top - point.y : point.y > rect.bottom ? point.y - rect.bottom : 0;
   const centerY = rect.top + rect.height / 2;
   const sameLineBonus = point.y >= rect.top - 2 && point.y <= rect.bottom + 2 ? 0 : 1e5;
   const linePenalty = Math.abs(point.y - centerY) * 200;
@@ -5434,7 +5445,7 @@ function scoreRectDistance(rect, point) {
   return sameLineBonus + linePenalty + inlinePenalty;
 }
 function rangeAtEditableEnd(element) {
-  const range = document.createRange();
+  const range = activeDocument.createRange();
   range.selectNodeContents(element);
   range.collapse(false);
   return range;
@@ -5459,7 +5470,7 @@ function selectNodeContents(node) {
   if (!selection) {
     return;
   }
-  const range = document.createRange();
+  const range = activeDocument.createRange();
   range.selectNodeContents(node);
   selection.removeAllRanges();
   selection.addRange(range);
@@ -5678,7 +5689,8 @@ function annotateEditableElements(root, ctx) {
 function safeGetSectionInfo(ctx, element) {
   try {
     return ctx.getSectionInfo?.(element) || null;
-  } catch (_) {
+  } catch (error) {
+    void error;
     return null;
   }
 }
@@ -5717,7 +5729,8 @@ function collectWorkspaceLeaves(app) {
   const leaves = [];
   try {
     app.workspace.iterateAllLeaves((leaf) => leaves.push(leaf));
-  } catch (_) {
+  } catch (error) {
+    void error;
     return [];
   }
   return leaves;
@@ -5800,7 +5813,8 @@ function canonicalizeWebviewUrl(url) {
   }
   try {
     return new URL(text).toString();
-  } catch (_) {
+  } catch (error) {
+    void error;
     return text;
   }
 }
@@ -5808,7 +5822,8 @@ function webviewSurfaceLabel(identity, view) {
   try {
     const parsed = new URL(identity);
     return parsed.hostname.replace(/^www\./, "") || viewTitle(view) || "webview";
-  } catch (_) {
+  } catch (error) {
+    void error;
     return viewTitle(view) || "webview";
   }
 }
@@ -5817,7 +5832,8 @@ function viewTitle(view) {
     if (typeof view?.getDisplayText === "function") {
       return view.getDisplayText();
     }
-  } catch (_) {
+  } catch (error) {
+    void error;
   }
   return view?.containerEl?.querySelector?.(".view-header-title")?.textContent?.trim() || view?.containerEl?.getAttribute?.("data-type") || view?.getViewType?.() || "webview";
 }
@@ -5870,7 +5886,7 @@ function flattenImageOnWhite(image) {
   try {
     const width = Math.max(1, image.naturalWidth || image.width);
     const height = Math.max(1, image.naturalHeight || image.height);
-    const canvas = document.createElement("canvas");
+    const canvas = activeDocument.createElement("canvas");
     canvas.width = width;
     canvas.height = height;
     const context = canvas.getContext("2d");
@@ -5882,7 +5898,8 @@ function flattenImageOnWhite(image) {
     context.drawImage(image, 0, 0, width, height);
     image.src = canvas.toDataURL("image/png");
     return true;
-  } catch (_) {
+  } catch (error) {
+    void error;
     return false;
   }
 }
@@ -5900,7 +5917,8 @@ function isSourceMode(view) {
     if (typeof view?.getMode === "function") {
       return view.getMode() === "source";
     }
-  } catch (_) {
+  } catch (error) {
+    void error;
   }
   const stateMode = view?.getState?.()?.mode;
   if (stateMode) {
@@ -5932,7 +5950,7 @@ function dispatchMouseClickThroughOverlay(canvas, clientPoint) {
   }
   const previousPointerEvents = canvas.style.pointerEvents;
   applyElementStyles(canvas, { pointerEvents: "none" });
-  const target = document.elementFromPoint(clientPoint.x, clientPoint.y);
+  const target = activeDocument.elementFromPoint(clientPoint.x, clientPoint.y);
   applyElementStyles(canvas, { pointerEvents: previousPointerEvents || "" });
   if (!target) {
     return false;
@@ -6005,7 +6023,7 @@ function isEmbeddedPreview(preview) {
   return Boolean(preview.closest(".markdown-embed, .markdown-embed-content, .internal-embed, .external-embed"));
 }
 function cleanupAllDrawingHeaderButtons() {
-  document.querySelectorAll(".notedraw-header-button, .notedraw-webview-button").forEach((button) => button.remove());
+  activeDocument.querySelectorAll(".notedraw-header-button, .notedraw-webview-button").forEach((button) => button.remove());
 }
 function cleanupDrawingUi(preview) {
   preview.querySelectorAll(".notedraw-button, .notedraw-fallback-button, .notedraw-webview-button, .notedraw-toolbar, .notedraw-palette-panel, .notedraw-text-panel, .notedraw-selection-menu, .notedraw-format-toolbar, .notedraw-embed-layer, .notedraw-file-input, .notedraw-canvas").forEach((element) => element.remove());
@@ -6033,7 +6051,13 @@ function normalizeVaultPath(path) {
   return String(path || "").replace(/\\/g, "/").replace(/^\/+/, "").replace(/\/+$/, "");
 }
 function sanitizeAssetFileName(name) {
-  const cleaned = String(name || "attachment.bin").replace(/\\/g, "/").split("/").pop().replace(/[<>:"|?*\u0000-\u001f]/g, "_").replace(/\s+/g, " ").trim();
+  const cleaned = String(name || "attachment.bin").replace(/\\/g, "/").split("/").pop().split("").map((character) => {
+    const code = character.charCodeAt(0);
+    if (character === "<" || character === ">" || character === ":" || character === '"' || character === "|" || character === "?" || character === "*" || code <= 31) {
+      return "_";
+    }
+    return character;
+  }).join("").replace(/\s+/g, " ").trim();
   return cleaned || "attachment.bin";
 }
 function normalizeStrokeKind(kind) {
@@ -6137,7 +6161,7 @@ function unwrapWikiLink(value) {
   if (wiki) {
     return wiki[1].trim();
   }
-  return text.replace(/^\!?\[\[/, "").replace(/\]\]$/, "").trim();
+  return text.replace(/^!?\[\[/, "").replace(/\]\]$/, "").trim();
 }
 function getEmbedRenderToken(stroke) {
   return [
@@ -6153,9 +6177,9 @@ function getEmbedRenderToken(stroke) {
 }
 function sanitizeHTMLToDomSafe(content) {
   const parsed = new DOMParser().parseFromString(String(content || ""), "text/html");
-  const fragment = document.createDocumentFragment();
+  const fragment = activeDocument.createDocumentFragment();
   Array.from(parsed.body.childNodes).forEach((node) => {
-    fragment.appendChild(document.importNode(node, true));
+    fragment.appendChild(activeDocument.importNode(node, true));
   });
   fragment.querySelectorAll("script, iframe, object, embed, link[rel='import']").forEach((node) => node.remove());
   fragment.querySelectorAll("*").forEach((element) => {
@@ -6786,11 +6810,11 @@ function getScrollEventTarget(scroller) {
   if (!scroller) {
     return window;
   }
-  return scroller === document.documentElement || scroller === document.body ? window : scroller;
+  return scroller === activeDocument.documentElement || scroller === activeDocument.body ? window : scroller;
 }
 function findScrollableAncestor(element) {
   let current = element;
-  while (current && current !== document.body && current !== document.documentElement) {
+  while (current && current !== activeDocument.body && current !== activeDocument.documentElement) {
     const style = window.getComputedStyle(current);
     const canScrollY = /(auto|scroll|overlay)/.test(style.overflowY) && current.scrollHeight > current.clientHeight;
     const canScrollX = /(auto|scroll|overlay)/.test(style.overflowX) && current.scrollWidth > current.clientWidth;
@@ -6799,7 +6823,7 @@ function findScrollableAncestor(element) {
     }
     current = current.parentElement;
   }
-  return document.scrollingElement || document.documentElement;
+  return activeDocument.scrollingElement || activeDocument.documentElement;
 }
 function loadExportImage(src, timeoutMs) {
   if (!src) {
