@@ -20,6 +20,7 @@ var LEGACY_DRAWING_DIR = `${LEGACY_PLUGIN_ID}/doodles`;
 var DEBUG_LOG_FILE = "debug-log.jsonl";
 var DEBUG_LOG_LIMIT = 150;
 var TEXT_SAVE_DELAY_MS = 160;
+var SETTINGS_SAVE_DELAY_MS = 260;
 var LONG_PRESS_MS = 550;
 var SELECT_TAP_DISTANCE = 6;
 var SELECT_STROKE_PADDING = 8;
@@ -918,6 +919,7 @@ var NoteDrawPlugin = class extends Plugin {
     this.headerActions = /* @__PURE__ */ new Map();
     this.saveTimers = /* @__PURE__ */ new Map();
     this.textSaveStates = /* @__PURE__ */ new WeakMap();
+    this.settingsSaveTimer = null;
     this.webviewSyncTimer = null;
     this.webviewMutationObserver = null;
     this.api = this.createPublicApi();
@@ -986,6 +988,10 @@ var NoteDrawPlugin = class extends Plugin {
       window.clearTimeout(timer);
     }
     this.saveTimers.clear();
+    if (this.settingsSaveTimer !== null) {
+      window.clearTimeout(this.settingsSaveTimer);
+      this.settingsSaveTimer = null;
+    }
     if (this.webviewSyncTimer !== null) {
       window.clearTimeout(this.webviewSyncTimer);
       this.webviewSyncTimer = null;
@@ -1004,6 +1010,17 @@ var NoteDrawPlugin = class extends Plugin {
       controller.refreshLocalizedLabels?.();
     }
     this.refreshLocalizedButtons();
+  }
+  scheduleSettingsSave() {
+    if (this.settingsSaveTimer !== null) {
+      window.clearTimeout(this.settingsSaveTimer);
+    }
+    this.settingsSaveTimer = window.setTimeout(() => {
+      this.settingsSaveTimer = null;
+      this.saveSettings().catch((error) => {
+        console.error(`[${PLUGIN_ID}] Failed to save settings`, error);
+      });
+    }, SETTINGS_SAVE_DELAY_MS);
   }
   t(key, vars = {}) {
     return translateNoteDraw(this, key, vars);
@@ -1063,7 +1080,7 @@ var NoteDrawPlugin = class extends Plugin {
   }
   createPublicApi() {
     return {
-      version: "3.1.20",
+      version: "3.1.22",
       getActiveController: () => this.getActiveController(),
       readDrawings: async (file) => this.readDrawings(file),
       writeDrawings: async (file, data) => this.writeDrawings(file, normalizeDrawingData(data, file)),
@@ -2060,6 +2077,7 @@ var PreviewDrawingController = class {
       this.syncCurrentBrushFields();
       this.syncColorSwatches();
       this.updateToolButtons();
+      this.persistCurrentBrushSettings();
     });
     this.hiddenFileInput = this.previewEl.createEl("input", {
       cls: "notedraw-file-input",
@@ -2093,6 +2111,7 @@ var PreviewDrawingController = class {
       this.currentBrushSettings().width = clamp(Number(this.widthInput.value), MIN_BRUSH_WIDTH, MAX_BRUSH_WIDTH);
       this.syncCurrentBrushFields();
       this.updateToolButtons();
+      this.persistCurrentBrushSettings();
     });
     this.opacityInput = this.createPaletteInput("droplets", "opacity", {
       type: "range",
@@ -2106,6 +2125,7 @@ var PreviewDrawingController = class {
       this.currentBrushSettings().opacity = clamp(Number(this.opacityInput.value), 0, 1);
       this.syncCurrentBrushFields();
       this.updateToolButtons();
+      this.persistCurrentBrushSettings();
     });
     this.embedLayer = this.previewEl.createDiv({ cls: "notedraw-embed-layer" });
     this.canvas = this.previewEl.createEl("canvas", { cls: "notedraw-canvas" });
@@ -2501,6 +2521,21 @@ var PreviewDrawingController = class {
     if (this.opacityInput) {
       this.opacityInput.value = String(settings.opacity);
     }
+  }
+  persistCurrentBrushSettings() {
+    const settings = this.currentBrushSettings();
+    const noteDrawSettings = this.plugin?.noteDrawSettings || {};
+    if (this.brushMode === BRUSH_WATERCOLOR) {
+      noteDrawSettings.defaultWatercolorColor = settings.color;
+      noteDrawSettings.defaultWatercolorWidth = settings.width;
+      noteDrawSettings.defaultWatercolorOpacity = settings.opacity;
+    } else {
+      noteDrawSettings.defaultPenColor = settings.color;
+      noteDrawSettings.defaultPenWidth = settings.width;
+      noteDrawSettings.defaultPenOpacity = settings.opacity;
+    }
+    this.plugin.noteDrawSettings = noteDrawSettings;
+    this.plugin.scheduleSettingsSave?.();
   }
   updateToolButtons() {
     const penActive = this.toolMode === TOOL_DRAW && this.brushMode === BRUSH_PEN;
@@ -3062,6 +3097,7 @@ var PreviewDrawingController = class {
     this.syncCurrentBrushFields();
     this.syncPaletteInputs();
     this.updateToolButtons();
+    this.persistCurrentBrushSettings();
   }
   syncColorSwatches() {
     if (!this.colorSwatchButtons?.length) {
