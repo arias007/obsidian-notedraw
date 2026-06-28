@@ -1199,7 +1199,7 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
   }
   createPublicApi() {
     return {
-      version: "3.1.28",
+      version: "3.1.29",
       getActiveController: () => this.getActiveController(),
       readDrawings: async (file) => this.readDrawings(file),
       writeDrawings: async (file, data) => this.writeDrawings(file, normalizeDrawingData(data, file)),
@@ -1378,6 +1378,7 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
       state.clickHandler = (event) => this.resolveHeaderController(view, state)?.onButtonClick(event);
       state.pointerDownHandler = (event) => this.resolveHeaderController(view, state)?.onButtonPointerDown(event);
       state.pointerUpHandler = (event) => this.resolveHeaderController(view, state)?.onButtonPointerUp(event);
+      state.touchEndHandler = (event) => this.resolveHeaderController(view, state)?.onButtonTouchEnd(event);
       let button = null;
       if (typeof view?.addAction === "function") {
         button = view.addAction("wand-sparkles", this.t("editTextDraw"), state.clickHandler);
@@ -1399,6 +1400,7 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
       button.addEventListener("pointerup", state.pointerUpHandler);
       button.addEventListener("pointercancel", state.pointerUpHandler);
       button.addEventListener("pointerleave", state.pointerUpHandler);
+      button.addEventListener("touchend", state.touchEndHandler, { passive: false });
       state.button = button;
       this.headerActions.set(view, state);
     }
@@ -1435,6 +1437,7 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
     button.addEventListener("pointerup", () => controller.onButtonPointerUp());
     button.addEventListener("pointercancel", () => controller.onButtonPointerUp());
     button.addEventListener("pointerleave", () => controller.onButtonPointerUp());
+    button.addEventListener("touchend", (event) => controller.onButtonTouchEnd(event), { passive: false });
     if (actions) {
       actions.appendChild(button);
     } else {
@@ -2062,11 +2065,14 @@ var PreviewDrawingController = class {
     this.drawingsVisible = true;
     this.buttonLongPressed = false;
     this.buttonLongPressTimer = null;
+    this.suppressNextButtonClick = false;
     this.paletteOpen = false;
     this.textPanelOpen = false;
     this.selectionMenuOpen = false;
     this.selectionLongPressTimer = null;
     this.selectionLongPressState = null;
+    this.floatingControlsHost = null;
+    this.floatingControlsInBody = false;
     this.textPreset = "plain";
     this.pendingEmbedTool = null;
     this.lastTextTap = null;
@@ -2108,8 +2114,11 @@ var PreviewDrawingController = class {
     this.previewEl.addClass("notedraw-shell");
     this.previewEl.toggleClass("is-notedraw-source-shell", this.surfaceType === "source");
     this.previewEl.toggleClass("is-notedraw-webview-shell", this.surfaceType === "webview");
+    this.floatingControlsInBody = shouldUseBodyFloatingControls(this.previewEl, this.surfaceType);
+    this.floatingControlsHost = this.floatingControlsInBody ? activeDocument.body : this.previewEl;
+    this.previewEl.toggleClass("has-notedraw-body-controls", this.floatingControlsInBody);
     this.button = this.createHeaderButton();
-    this.toolbar = this.previewEl.createDiv({ cls: "notedraw-toolbar" });
+    this.toolbar = createNoteDrawControlElement(this.floatingControlsHost, "notedraw-toolbar");
     this.selectButton = this.toolbar.createEl("button", {
       attr: { type: "button", title: this.plugin.t("selectDrawings") }
     });
@@ -2172,13 +2181,13 @@ var PreviewDrawingController = class {
       }
       this.togglePalettePanel();
     });
-    this.palettePanel = this.previewEl.createDiv({ cls: "notedraw-palette-panel" });
+    this.palettePanel = createNoteDrawControlElement(this.floatingControlsHost, "notedraw-palette-panel");
     this.createColorPalette();
     if (this.surfaceType !== "source") {
-      this.textPanel = this.previewEl.createDiv({ cls: "notedraw-text-panel" });
+      this.textPanel = createNoteDrawControlElement(this.floatingControlsHost, "notedraw-text-panel");
       this.createTextPanel();
     }
-    this.selectionMenu = this.previewEl.createDiv({ cls: "notedraw-selection-menu" });
+    this.selectionMenu = createNoteDrawControlElement(this.floatingControlsHost, "notedraw-selection-menu");
     this.createSelectionMenu();
     if (this.allowTextEdit && this.surfaceType !== "webview") {
       this.createFormatToolbar();
@@ -2199,7 +2208,7 @@ var PreviewDrawingController = class {
       this.updateToolButtons();
       this.persistCurrentBrushSettings();
     });
-    this.hiddenFileInput = this.previewEl.createEl("input", {
+    this.hiddenFileInput = this.floatingControlsHost.createEl("input", {
       cls: "notedraw-file-input",
       attr: {
         type: "file",
@@ -2469,6 +2478,7 @@ var PreviewDrawingController = class {
     this.previewEl.removeClass("is-edit-md-mode");
     this.previewEl.removeClass("is-notedraw-source-shell");
     this.previewEl.removeClass("is-notedraw-webview-shell");
+    this.previewEl.removeClass("has-notedraw-body-controls");
     this.previewEl.removeClass("is-resizing-selection");
     this.previewEl.removeClass("is-native-text-editing");
     this.clearSelectionLongPress();
@@ -2479,6 +2489,7 @@ var PreviewDrawingController = class {
   async toggle() {
     this.active = !this.active;
     this.previewEl.toggleClass("is-drawing-active", this.active);
+    this.syncFloatingControlClasses();
     this.button?.classList.toggle("is-active", this.active);
     if (!this.active) {
       this.endTextEdit();
@@ -2495,6 +2506,14 @@ var PreviewDrawingController = class {
         console.error(`[${PLUGIN_ID}] Failed to load drawings`, error);
       });
       this.scheduleLayoutRefresh();
+    }
+  }
+  syncFloatingControlClasses() {
+    for (const element of [this.toolbar, this.palettePanel, this.textPanel, this.selectionMenu, this.formatToolbar]) {
+      element?.toggleClass("is-drawing-active", Boolean(this.active));
+      element?.toggleClass("is-palette-open", Boolean(this.paletteOpen));
+      element?.toggleClass("is-text-panel-open", Boolean(this.textPanelOpen));
+      element?.toggleClass("is-selection-menu-open", Boolean(this.selectionMenuOpen));
     }
   }
   async ensureDrawingsLoaded() {
@@ -2825,11 +2844,13 @@ var PreviewDrawingController = class {
     this.selectionMenuOpen = true;
     this.selectionMenu.addClass("is-visible");
     this.previewEl.addClass("is-selection-menu-open");
+    this.syncFloatingControlClasses();
   }
   hideSelectionMenu() {
     this.selectionMenuOpen = false;
     this.selectionMenu?.removeClass("is-visible");
     this.previewEl?.removeClass("is-selection-menu-open");
+    this.syncFloatingControlClasses();
   }
   startSelectionLongPress(event) {
     this.clearSelectionLongPress();
@@ -2859,7 +2880,7 @@ var PreviewDrawingController = class {
     this.selectionLongPressState = null;
   }
   createFormatToolbar() {
-    this.formatToolbar = this.previewEl.createDiv({ cls: "notedraw-format-toolbar" });
+    this.formatToolbar = createNoteDrawControlElement(this.floatingControlsHost || this.previewEl, "notedraw-format-toolbar");
     this.formatToolbar.addEventListener("mousedown", (event) => {
       if (event.target?.closest?.("button")) {
         event.preventDefault();
@@ -3194,6 +3215,7 @@ var PreviewDrawingController = class {
   setTextPanelOpen(open) {
     this.textPanelOpen = Boolean(open) && this.surfaceType !== "source";
     this.previewEl.toggleClass("is-text-panel-open", this.textPanelOpen);
+    this.syncFloatingControlClasses();
     this.textButton?.classList.toggle("is-active", this.toolMode === TOOL_TEXT || this.textPanelOpen);
     if (this.textPanelOpen) {
       this.setPaletteOpen(false);
@@ -3303,6 +3325,7 @@ var PreviewDrawingController = class {
   setPaletteOpen(open) {
     this.paletteOpen = Boolean(open);
     this.previewEl.toggleClass("is-palette-open", this.paletteOpen);
+    this.syncFloatingControlClasses();
     this.paletteButton?.classList.toggle("is-active", this.paletteOpen);
     if (this.paletteOpen) {
       this.updateFloatingControlsPosition();
@@ -3333,7 +3356,34 @@ var PreviewDrawingController = class {
   onButtonPointerUp() {
     this.clearButtonLongPress();
   }
+  onButtonTouchEnd(event) {
+    this.clearButtonLongPress();
+    if (!isAppleMobileRuntime()) {
+      return;
+    }
+    if (this.buttonLongPressed) {
+      this.buttonLongPressed = false;
+      event?.preventDefault?.();
+      event?.stopPropagation?.();
+      return;
+    }
+    event?.preventDefault?.();
+    event?.stopPropagation?.();
+    this.suppressNextButtonClick = true;
+    window.setTimeout(() => {
+      this.suppressNextButtonClick = false;
+    }, 500);
+    this.toggle().catch((error) => {
+      console.error(`[${PLUGIN_ID}] Failed to toggle NoteDraw`, error);
+    });
+  }
   onButtonClick(event) {
+    if (this.suppressNextButtonClick) {
+      this.suppressNextButtonClick = false;
+      event?.preventDefault?.();
+      event?.stopPropagation?.();
+      return;
+    }
     if (this.buttonLongPressed) {
       this.buttonLongPressed = false;
       event?.preventDefault();
@@ -5759,6 +5809,25 @@ function setNoteDrawCssProps(element, props) {
     element.setCssProps(props);
   }
 }
+function createNoteDrawControlElement(parent, cls) {
+  const element = parent.createDiv({ cls });
+  if (parent === activeDocument.body) {
+    element.addClass("notedraw-body-control");
+  }
+  return element;
+}
+function shouldUseBodyFloatingControls(previewEl, surfaceType) {
+  if (surfaceType !== "preview") {
+    return false;
+  }
+  return isAppleMobileRuntime() && Boolean(previewEl.closest?.(".markdown-preview-view"));
+}
+function isAppleMobileRuntime() {
+  const platform = String(navigator?.platform || "");
+  const userAgent = String(navigator?.userAgent || "");
+  const maxTouchPoints = Number(navigator?.maxTouchPoints || 0);
+  return /iPad|iPhone|iPod/.test(platform) || /iPad|iPhone|iPod/.test(userAgent) || platform === "MacIntel" && maxTouchPoints > 1;
+}
 function setAccessibleLabel(element, label) {
   if (!element || !label) {
     return;
@@ -6486,10 +6555,11 @@ function isEmbeddedPreview(preview) {
 }
 function cleanupAllDrawingHeaderButtons() {
   activeDocument.querySelectorAll(".notedraw-header-button, .notedraw-webview-button").forEach((button) => button.remove());
+  activeDocument.body?.querySelectorAll?.(".notedraw-body-control, .notedraw-file-input").forEach((element) => element.remove());
 }
 function cleanupDrawingUi(preview) {
   preview.querySelectorAll(".notedraw-button, .notedraw-fallback-button, .notedraw-webview-button, .notedraw-toolbar, .notedraw-palette-panel, .notedraw-text-panel, .notedraw-selection-menu, .notedraw-format-toolbar, .notedraw-embed-layer, .notedraw-file-input, .notedraw-canvas").forEach((element) => element.remove());
-  preview.classList.remove("notedraw-shell", "is-drawing-active", "is-drawing-hidden", "is-select-mode", "is-palette-open", "is-text-panel-open", "is-selection-menu-open", "is-watercolor-mode", "is-edit-md-mode", "is-selecting-strokes", "is-resizing-selection", "is-native-text-editing", "is-notedraw-webview-shell");
+  preview.classList.remove("notedraw-shell", "is-drawing-active", "is-drawing-hidden", "is-select-mode", "is-palette-open", "is-text-panel-open", "is-selection-menu-open", "is-watercolor-mode", "is-edit-md-mode", "is-selecting-strokes", "is-resizing-selection", "is-native-text-editing", "is-notedraw-webview-shell", "has-notedraw-body-controls");
 }
 function isWebviewSyncMutation(mutation) {
   if (!mutation) {

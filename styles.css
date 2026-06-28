@@ -254,6 +254,10 @@
   display: inline-flex;
 }
 
+.notedraw-body-control.notedraw-toolbar.is-drawing-active {
+  display: inline-flex;
+}
+
 .notedraw-toolbar button {
   width: 28px;
   height: 28px;
@@ -462,6 +466,11 @@
   gap: 8px;
 }
 
+.notedraw-body-control.notedraw-palette-panel.is-drawing-active.is-palette-open {
+  display: grid;
+  gap: 8px;
+}
+
 .notedraw-text-panel {
   position: fixed;
   z-index: 1002;
@@ -478,6 +487,11 @@
 }
 
 .notedraw-shell.is-drawing-active.is-text-panel-open .notedraw-text-panel {
+  display: grid;
+  gap: 8px;
+}
+
+.notedraw-body-control.notedraw-text-panel.is-drawing-active.is-text-panel-open {
   display: grid;
   gap: 8px;
 }
