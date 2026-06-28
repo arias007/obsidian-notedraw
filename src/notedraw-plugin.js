@@ -5,12 +5,12 @@ import {
   Notice,
   Plugin,
   PluginSettingTab,
-  getLanguage,
   normalizePath,
   setIcon
 } from "obsidian";
 import SUPPORT_CODE_ALIPAY_DATA_URL from "../extras/code-1.jpg";
 import SUPPORT_CODE_BINANCE_DATA_URL from "../extras/code-2.png";
+const activeDocument = document;
 var PLUGIN_ID = "notedraw";
 var DRAWING_DIR = `${PLUGIN_ID}/drawings`;
 var ASSET_DIR = `${PLUGIN_ID}/assets`;
@@ -2449,10 +2449,12 @@ var PreviewDrawingController = class {
     const maxTop = Math.max(minTop, window.innerHeight - toolbarHeight - 8);
     const topOffset = sanitizeSettings(this.plugin?.noteDrawSettings || {}).toolbarTopOffset;
     const top = clamp(anchorBottom + topOffset, minTop, maxTop);
-    this.previewEl.style.setProperty("--notedraw-toolbar-right", `${Math.round(right)}px`);
-    this.previewEl.style.setProperty("--notedraw-toolbar-top", `${Math.round(top)}px`);
-    this.previewEl.style.setProperty("--notedraw-palette-top", `${Math.round(top + 42)}px`);
-    this.previewEl.style.setProperty("--notedraw-text-panel-top", `${Math.round(top + 42)}px`);
+    setNoteDrawCssProps(this.previewEl, {
+      "--notedraw-toolbar-right": `${Math.round(right)}px`,
+      "--notedraw-toolbar-top": `${Math.round(top)}px`,
+      "--notedraw-palette-top": `${Math.round(top + 42)}px`,
+      "--notedraw-text-panel-top": `${Math.round(top + 42)}px`
+    });
   }
   setBrushMode(mode) {
     if (![BRUSH_PEN, BRUSH_WATERCOLOR].includes(mode)) {
@@ -2677,8 +2679,10 @@ var PreviewDrawingController = class {
     const viewportHeight = Math.max(120, viewport?.height || window.innerHeight || 120);
     const left = clamp(Math.round(x - width / 2), viewportLeft + 8, Math.max(viewportLeft + 8, viewportLeft + viewportWidth - width - 8));
     const top = clamp(Math.round(y - height - 14), viewportTop + 8, Math.max(viewportTop + 8, viewportTop + viewportHeight - height - 8));
-    this.selectionMenu.style.setProperty("--notedraw-selection-menu-left", `${left}px`);
-    this.selectionMenu.style.setProperty("--notedraw-selection-menu-top", `${top}px`);
+    setNoteDrawCssProps(this.selectionMenu, {
+      "--notedraw-selection-menu-left": `${left}px`,
+      "--notedraw-selection-menu-top": `${top}px`
+    });
     this.selectionMenuOpen = true;
     this.selectionMenu.addClass("is-visible");
     this.previewEl.addClass("is-selection-menu-open");
@@ -2842,8 +2846,10 @@ var PreviewDrawingController = class {
       const top = clamp(Math.round(this.formatToolbarManualPosition.top), minTop, maxTop);
       const manualLeft = clamp(Math.round(this.formatToolbarManualPosition.left), viewportLeft + 8, Math.max(viewportLeft + 8, viewportLeft + viewportWidth - width - 8));
       this.formatToolbarManualPosition = { top, left: manualLeft };
-      this.formatToolbar.style.setProperty("--notedraw-format-top", `${top}px`);
-      this.formatToolbar.style.setProperty("--notedraw-format-left", `${manualLeft}px`);
+      setNoteDrawCssProps(this.formatToolbar, {
+        "--notedraw-format-top": `${top}px`,
+        "--notedraw-format-left": `${manualLeft}px`
+      });
       return;
     }
     const lineStep = Math.max(22, Math.round(rect.height + 6));
@@ -2851,8 +2857,10 @@ var PreviewDrawingController = class {
     const above = rect.top - height - gap;
     const below = rect.bottom + gap;
     const top = belowOneLine <= maxTop ? belowOneLine : below <= maxTop ? below : above >= minTop ? above : clamp(Math.round(belowOneLine), minTop, maxTop);
-    this.formatToolbar.style.setProperty("--notedraw-format-top", `${top}px`);
-    this.formatToolbar.style.setProperty("--notedraw-format-left", `${left}px`);
+    setNoteDrawCssProps(this.formatToolbar, {
+      "--notedraw-format-top": `${top}px`,
+      "--notedraw-format-left": `${left}px`
+    });
   }
   startFormatToolbarDrag(event) {
     if (!this.formatToolbar) {
@@ -2897,8 +2905,10 @@ var PreviewDrawingController = class {
       Math.max(viewportLeft + 8, viewportLeft + viewportWidth - toolbarRect.width - 8)
     );
     this.formatToolbarManualPosition = { top, left };
-    this.formatToolbar.style.setProperty("--notedraw-format-top", `${Math.round(top)}px`);
-    this.formatToolbar.style.setProperty("--notedraw-format-left", `${Math.round(left)}px`);
+    setNoteDrawCssProps(this.formatToolbar, {
+      "--notedraw-format-top": `${Math.round(top)}px`,
+      "--notedraw-format-left": `${Math.round(left)}px`
+    });
   }
   onFormatToolbarDragEnd(event) {
     if (this.formatToolbarDrag && event?.pointerId !== this.formatToolbarDrag.pointerId) {
@@ -3066,7 +3076,7 @@ var PreviewDrawingController = class {
           "aria-label": this.plugin.t("useColor", { color })
         }
       });
-      button.style.setProperty("--notedraw-swatch-color", color);
+      setNoteDrawCssProps(button, { "--notedraw-swatch-color": color });
       button.addEventListener("click", (event) => {
         event.preventDefault();
         event.stopPropagation();
@@ -3121,8 +3131,10 @@ var PreviewDrawingController = class {
     button.classList.add("notedraw-brush-button");
     button.classList.toggle("is-active", active);
     button.classList.toggle("is-brush-color-active", active);
-    button.style.setProperty("--notedraw-brush-button-color", color);
-    button.style.setProperty("--notedraw-brush-button-contrast", contrastTextColor(color));
+    setNoteDrawCssProps(button, {
+      "--notedraw-brush-button-color": color,
+      "--notedraw-brush-button-contrast": contrastTextColor(color)
+    });
   }
   toggleSelectMode() {
     this.toolMode = this.toolMode === TOOL_SELECT ? TOOL_DRAW : TOOL_SELECT;
@@ -5363,12 +5375,14 @@ function resolveNoteDrawLanguage(plugin) {
 }
 function detectNoteDrawLanguage(app) {
   const navigatorLanguage = typeof navigator !== "undefined" ? navigator.language : "";
+  const navigatorLanguages = typeof navigator !== "undefined" ? Array.from(navigator.languages ?? []) : [];
   const candidates = [
     app?.vault?.getConfig?.("language"),
     app?.vault?.getConfig?.("locale"),
-    app?.appId,
-    getLanguage(),
-    navigatorLanguage
+    document.documentElement.lang,
+    navigatorLanguage,
+    ...navigatorLanguages,
+    app?.appId
   ];
   for (const candidate of candidates) {
     const language = normalizeLanguageCode(candidate, false);
@@ -5401,6 +5415,15 @@ function normalizeLanguageCode(value, allowAuto = true) {
 }
 function languageNativeName(language) {
   return LANGUAGE_OPTIONS.find((option) => option.value === language)?.label || LANGUAGE_OPTIONS.find((option) => option.value === "en")?.label || "English";
+}
+function setNoteDrawCssProps(element, props) {
+  if (typeof element?.setCssProps === "function") {
+    element.setCssProps(props);
+    return;
+  }
+  for (const [key, value] of Object.entries(props)) {
+    element?.style?.setProperty(key, value);
+  }
 }
 function setAccessibleLabel(element, label) {
   if (!element || !label) {

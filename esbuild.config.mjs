@@ -3,7 +3,7 @@ import esbuild from "esbuild";
 await esbuild.build({
   entryPoints: ["src/main.js"],
   bundle: true,
-  platform: "node",
+  platform: "browser",
   target: "es2020",
   format: "cjs",
   external: ["obsidian"],
