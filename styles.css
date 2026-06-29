@@ -47,12 +47,12 @@
 .notedraw-canvas {
   position: absolute;
   z-index: 60;
-  top: var(--notedraw-canvas-top, 0);
+  top: 0;
   left: 0;
   right: auto;
   bottom: auto;
   width: 100%;
-  height: calc(100% - var(--notedraw-canvas-top, 0px));
+  height: 100%;
   pointer-events: none;
   touch-action: none;
   user-select: none;
@@ -61,12 +61,12 @@
 .notedraw-embed-layer {
   position: absolute;
   z-index: 55;
-  top: var(--notedraw-canvas-top, 0);
+  top: 0;
   left: 0;
   right: auto;
   bottom: auto;
   width: 100%;
-  height: calc(100% - var(--notedraw-canvas-top, 0px));
+  height: 100%;
   pointer-events: none;
   user-select: none;
 }

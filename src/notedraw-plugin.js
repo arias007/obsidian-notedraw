@@ -1032,6 +1032,7 @@ var NoteDrawPlugin = class extends Plugin {
     this.addSettingTab(new NoteDrawSettingTab(this.app, this));
     const syncSurfaces = () => {
       this.syncSourceControllers();
+      this.syncMarkdownControllerModes();
       this.syncWebviewControllers();
     };
     this.registerEvent(this.app.workspace.on("layout-change", syncSurfaces));
@@ -1177,7 +1178,7 @@ var NoteDrawPlugin = class extends Plugin {
   }
   createPublicApi() {
     return {
-      version: "3.1.31",
+      version: "3.1.32",
       getActiveController: () => this.getActiveController(),
       readDrawings: async (file) => this.readDrawings(file),
       writeDrawings: async (file, data) => this.writeDrawings(file, normalizeDrawingData(data, file)),
@@ -1288,6 +1289,31 @@ var NoteDrawPlugin = class extends Plugin {
       if (!activeViews.has(view) && !controller.previewEl?.isConnected) {
         controller.destroy();
         this.sourceControllers.delete(view);
+      }
+    }
+  }
+  syncMarkdownControllerModes() {
+    const leaves = this.app.workspace.getLeavesOfType?.("markdown") || [];
+    for (const leaf of leaves) {
+      const view = leaf.view;
+      if (!(view instanceof MarkdownView)) {
+        continue;
+      }
+      const preview = findRootPreviewForView(view);
+      const source = findSourceSurfaceForView(view);
+      const previewController = preview ? this.controllers.get(preview) || preview._noteDrawController : null;
+      const sourceController = source ? this.controllers.get(source) || source._noteDrawController : null;
+      const sourceVisible = isElementVisibleEnough(source);
+      const previewVisible = isElementVisibleEnough(preview);
+      if (sourceVisible && previewController?.active) {
+        previewController.toggle().catch((error) => {
+          console.error(`[${PLUGIN_ID}] Failed to close preview NoteDraw controller`, error);
+        });
+      }
+      if (previewVisible && sourceController?.active) {
+        sourceController.toggle().catch((error) => {
+          console.error(`[${PLUGIN_ID}] Failed to close source NoteDraw controller`, error);
+        });
       }
     }
   }
@@ -2613,13 +2639,11 @@ var PreviewDrawingController = class {
     const maxTop = Math.max(minTop, window.innerHeight - toolbarHeight - 8);
     const topOffset = sanitizeSettings(this.plugin?.noteDrawSettings || {}).toolbarTopOffset;
     const top = clamp(anchorBottom + topOffset, minTop, maxTop);
-    const canvasTop = this.surfaceType === "preview" ? Math.max(0, Math.round(headerBottom - hostRect.top)) : 0;
     const props = {
       "--notedraw-toolbar-right": `${Math.round(right)}px`,
       "--notedraw-toolbar-top": `${Math.round(top)}px`,
       "--notedraw-palette-top": `${Math.round(top + 42)}px`,
-      "--notedraw-text-panel-top": `${Math.round(top + 42)}px`,
-      "--notedraw-canvas-top": `${canvasTop}px`
+      "--notedraw-text-panel-top": `${Math.round(top + 42)}px`
     };
     setNoteDrawCssProps(this.previewEl, props);
     if (this.floatingControlsInBody) {
@@ -3461,6 +3485,9 @@ var PreviewDrawingController = class {
     if (!this.active || event.button !== 0) {
       return;
     }
+    if (this.shouldPassThroughHeaderPoint(event)) {
+      return;
+    }
     if (event.pointerType === "touch") {
       this.touchPointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
       if (this.suppressTouchDrawing || this.touchPointers.size >= 2) {
@@ -3601,6 +3628,27 @@ var PreviewDrawingController = class {
     };
     event.preventDefault();
     event.stopPropagation();
+  }
+  shouldPassThroughHeaderPoint(event) {
+    if (this.surfaceType !== "preview" || !isAppleMobileRuntime()) {
+      return false;
+    }
+    const header = this.view?.containerEl?.querySelector?.(".view-header") || this.button?.closest?.(".view-header");
+    const headerRect = header?.getBoundingClientRect?.();
+    if (!headerRect || event.clientY > headerRect.bottom + 4) {
+      return false;
+    }
+    const target = this.elementBelowCanvas(event.clientX, event.clientY);
+    const noteDrawButton = target?.closest?.(".notedraw-header-button, .notedraw-fallback-button, .notedraw-webview-button");
+    this.toggle().catch((error) => {
+      console.error(`[${PLUGIN_ID}] Failed to toggle NoteDraw`, error);
+    });
+    if (!noteDrawButton) {
+      dispatchMouseClickThroughOverlay(this.canvas, { x: event.clientX, y: event.clientY });
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    return true;
   }
   elementBelowCanvas(clientX, clientY) {
     const previous = this.canvas.style.pointerEvents;
