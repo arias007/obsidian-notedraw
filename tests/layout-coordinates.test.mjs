@@ -75,7 +75,8 @@ test("malformed anchors are normalized without escaping the supported lane", () 
     x: 2,
     y: 0,
     path: "",
-    line: null
+    line: null,
+    lineConfidence: null
   });
 });
 
@@ -197,6 +198,28 @@ test("real Markdown line anchors may move farther than document-relative height 
       y: 0.42,
       path: "Notes/example.md",
       line: 42.4
+    }
+  }, {
+    canvasWidth: 400,
+    canvasHeight: 3000,
+    frame: { left: 20, width: 360 },
+    lineToCanvasY: () => 2050
+  });
+
+  assert.equal(projected.y, 2050 / 3000);
+});
+
+test("high-confidence captured line anchors can use end-clamped fractional lines", () => {
+  const projected = projectResponsivePoint({
+    x: 0.5,
+    y: 0.42,
+    anchor: {
+      basis: RESPONSIVE_POINT_BASIS,
+      x: 0.5,
+      y: 0.42,
+      path: "Notes/example.md",
+      line: 42.999999,
+      lineConfidence: 1
     }
   }, {
     canvasWidth: 400,

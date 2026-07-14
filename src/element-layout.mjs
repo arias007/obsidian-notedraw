@@ -20,6 +20,31 @@ function normalizeLine(value) {
   return Number.isFinite(number) && number >= 0 ? number : null;
 }
 
+function normalizeLineConfidence(value) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+  const number = Number(value);
+  return Number.isFinite(number) ? clamp(number, 0, 1) : null;
+}
+
+function isEndClampedLine(line) {
+  if (!Number.isFinite(line)) {
+    return false;
+  }
+  return line - Math.floor(line) >= 0.985;
+}
+
+function canTrustCornerLine(corner) {
+  if (!corner || corner.line === null) {
+    return false;
+  }
+  if (corner.lineConfidence !== null) {
+    return corner.lineConfidence >= 0.75;
+  }
+  return !isEndClampedLine(corner.line);
+}
+
 function normalizeFrame(frame = {}) {
   const surfaceWidth = Math.max(1, finite(frame.surfaceWidth, frame.width || 1));
   const contentLeft = clamp(finite(frame.contentLeft, frame.left || 0), -surfaceWidth, surfaceWidth * 2);
@@ -44,7 +69,8 @@ function normalizeCorner(corner) {
     x: clamp(finite(corner.x, 0), -2, 3),
     y: clamp(finite(corner.y, 0), 0, 1),
     path: typeof corner.path === "string" ? corner.path : "",
-    line: normalizeLine(corner.line)
+    line: normalizeLine(corner.line),
+    lineConfidence: normalizeLineConfidence(corner.lineConfidence)
   };
 }
 
@@ -151,7 +177,8 @@ export function createElementLayout({
       x: clamp((positions[name].x - sourceFrame.contentLeft) / sourceFrame.contentWidth, -2, 3),
       y: clamp(positions[name].y / documentHeight, 0, 1),
       path: typeof location.path === "string" && location.path ? location.path : sourcePath,
-      line: normalizeLine(location.line)
+      line: normalizeLine(location.line),
+      lineConfidence: normalizeLineConfidence(location.lineConfidence ?? location.confidence)
     };
   }
   return normalizeElementLayout({
@@ -177,17 +204,40 @@ function projectCorner(corner, target, lineToCanvasY) {
     ? Number(lineToCanvasY(corner.path, corner.line))
     : NaN;
   const firstLineIsPlausible = corner.line === null || corner.line >= 1 || corner.y <= 0.15;
+  const lineIsReliable = canTrustCornerLine(corner);
   const maxLineShift = Math.max(96, Math.min(frame.documentHeight * 0.18, frame.viewportHeight * 0.45));
   const lineShiftIsPlausible = corner.line !== null && corner.line >= 1
     ? true
     : Math.abs(lineY - fallbackY) <= maxLineShift;
-  const canUseLine = Number.isFinite(lineY) && firstLineIsPlausible && lineShiftIsPlausible;
+  const canUseLine = Number.isFinite(lineY) && firstLineIsPlausible && lineIsReliable && lineShiftIsPlausible;
   return {
     x: frame.contentLeft + corner.x * frame.contentWidth,
     y: canUseLine ? lineY : fallbackY,
     fallbackY,
     lineAnchored: canUseLine
   };
+}
+
+export function elementLayoutNeedsRepair(layoutInput) {
+  const layout = normalizeElementLayout(layoutInput);
+  if (!layout) {
+    return true;
+  }
+  const frame = layout.sourceFrame;
+  if (frame.surfaceWidth < 180 || frame.contentWidth < 140 || frame.contentWidth / frame.surfaceWidth < 0.42) {
+    return true;
+  }
+  const verticalSpan = layout.box.height / Math.max(1, frame.documentHeight);
+  const corners = Object.values(layout.corners).filter(Boolean);
+  if (corners.some((corner) => corner.line !== null && corner.lineConfidence === null && isEndClampedLine(corner.line) && corner.y > 0.08)) {
+    return true;
+  }
+  const topLine = layout.corners.topLeft?.line;
+  const bottomLine = layout.corners.bottomLeft?.line;
+  if (Number.isFinite(topLine) && Number.isFinite(bottomLine) && Math.floor(topLine) === Math.floor(bottomLine) && verticalSpan > 0.08) {
+    return true;
+  }
+  return false;
 }
 
 export function calculateElementScale(sourceFrameInput, targetFrameInput, boxInput = {}) {

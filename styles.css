@@ -274,10 +274,6 @@
   touch-action: pan-x;
 }
 
-.notedraw-toolbar::-webkit-scrollbar {
-  display: none;
-}
-
 .notedraw-shell.is-drawing-active.is-notedraw-controls-visible .notedraw-toolbar {
   display: inline-flex;
 }

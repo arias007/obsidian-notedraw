@@ -28,6 +28,7 @@ import {
   ELEMENT_LAYOUT_BASIS,
   captureElementRelations,
   createElementLayout,
+  elementLayoutNeedsRepair,
   normalizeElementLayout,
   projectElementLayout,
   projectElementPoints,
@@ -1330,7 +1331,7 @@ var NoteDrawPlugin = class extends Plugin {
       on: (eventName, listener) => this.onApiEvent(eventName, listener)
     };
     return {
-      version: "3.1.43",
+      version: "3.1.44",
       apiVersion: v1.apiVersion,
       capabilities,
       v1,
@@ -1944,12 +1945,12 @@ var NoteDrawPlugin = class extends Plugin {
       return createEmptyDrawingData(file);
     }
   }
-  scheduleDrawingSave(file, data) {
+  scheduleDrawingSave(file, data, options = {}) {
     const path = this.drawingPathForFile(file);
-    const canonical = normalizeDrawingData(data, file);
+    const canonical = normalizeDrawingDataForStorage(data, file);
     this.drawingStateCache.set(path, canonical);
     this.pendingDrawingSaves.set(path, file);
-    this.refreshControllersForFile(file, canonical, { excludeData: data });
+    this.refreshControllersForFile(file, canonical, { excludeData: options.excludeData || data });
     const previous = this.saveTimers.get(path);
     if (previous) {
       window.clearTimeout(previous);
@@ -1975,7 +1976,7 @@ var NoteDrawPlugin = class extends Plugin {
       if (!latest) {
         return;
       }
-      const compacted = normalizeDrawingData(latest, file);
+      const compacted = normalizeDrawingDataForStorage(latest, file);
       compactDrawingData(compacted, this.noteDrawSettings?.drawingCompactDistance ?? DEFAULT_SETTINGS.drawingCompactDistance);
       await this.writeDrawings(file, compacted, { refresh: false, updateCache: false });
     });
@@ -1991,7 +1992,7 @@ var NoteDrawPlugin = class extends Plugin {
   async writeDrawings(file, data, options = {}) {
     await this.ensureDrawingDir();
     const path = this.drawingPathForFile(file);
-    const normalized = normalizeDrawingData(data, file);
+    const normalized = normalizeDrawingDataForStorage(data, file);
     const updatedAt = (/* @__PURE__ */ new Date()).toISOString();
     normalized.updatedAt = updatedAt;
     if (options.updateCache !== false) {
@@ -4116,6 +4117,7 @@ var PreviewDrawingController = class {
         frame: context.frame,
         sourcePath: lineLocation?.path || this.file?.path || "",
         linePosition: lineLocation?.line ?? null,
+        lineConfidence: lineLocation?.lineConfidence ?? null,
         time: point?.t
       })
     };
@@ -4131,7 +4133,7 @@ var PreviewDrawingController = class {
     }
     this.rebuildElementRelations();
   }
-  captureElementLayoutForStroke(stroke, context = this.getResponsiveLayoutContext(), index = -1) {
+  captureElementLayoutForStroke(stroke, context = this.getResponsiveLayoutContext(), index = -1, options = {}) {
     const bounds = getStrokeBounds(stroke, this.canvasWidth(), this.canvasHeight());
     if (!bounds) {
       return null;
@@ -4163,7 +4165,7 @@ var PreviewDrawingController = class {
         previewWidth: stroke.previewWidth,
         previewHeight: stroke.previewHeight
       },
-      relations: previous?.relations || []
+      relations: options.preserveRelations === false ? [] : previous?.relations || []
     });
     return stroke.layout;
   }
@@ -4197,6 +4199,26 @@ var PreviewDrawingController = class {
       }
     }
   }
+  projectStrokePointsForLayoutRepair(stroke, context, layout) {
+    const lineToCanvasY = (path, line) => this.projectLineLocation(path, line, context);
+    const sourceFrame = layout?.sourceFrame;
+    const trustAnchorX = Boolean(sourceFrame) && isStableResponsiveCaptureFrame(sourceFrame.surfaceWidth, { width: sourceFrame.contentWidth });
+    return (Array.isArray(stroke?.points) ? stroke.points : []).map((point) => {
+      const projected = projectResponsivePoint(point, {
+        canvasWidth: this.canvasWidth(),
+        canvasHeight: this.canvasHeight(),
+        frame: context.frame,
+        lineToCanvasY
+      });
+      if (trustAnchorX || !point?.anchor) {
+        return projected;
+      }
+      return {
+        ...projected,
+        x: clamp(Number(point.x), 0, 1)
+      };
+    });
+  }
   initializeAndProjectResponsivePoints(context, signature) {
     let migrated = false;
     const elementIds = new Set();
@@ -4205,15 +4227,22 @@ var PreviewDrawingController = class {
       this.responsiveLayoutSignature = "";
       return;
     }
+    const lineToCanvasY = (path, line) => this.projectLineLocation(path, line, context);
     for (const [index, stroke] of (this.drawingData?.strokes || []).entries()) {
       const existingLayout = normalizeElementLayout(stroke.layout);
-      const hasUniqueElementLayout = Boolean(existingLayout?.id) && !elementIds.has(existingLayout.id);
+      const needsLayoutRepair = Boolean(existingLayout) && elementLayoutNeedsRepair(existingLayout);
+      const hasUniqueElementLayout = Boolean(existingLayout?.id) && !elementIds.has(existingLayout.id) && !needsLayoutRepair;
       if (!hasUniqueElementLayout) {
-        if (existingLayout) {
+        if (needsLayoutRepair) {
+          stroke.points = this.projectStrokePointsForLayoutRepair(stroke, context, existingLayout);
+          stroke.layout = null;
+        } else if (existingLayout) {
           stroke.layout = { ...existingLayout, id: "" };
         }
-        stroke.points = stroke.points.map((point) => this.captureResponsivePoint(point, context));
-        this.captureElementLayoutForStroke(stroke, context, index);
+        if (!needsLayoutRepair) {
+          stroke.points = stroke.points.map((point) => this.captureResponsivePoint(point, context));
+        }
+        this.captureElementLayoutForStroke(stroke, context, index, { preserveRelations: !needsLayoutRepair });
         migrated = true;
       }
       const elementId = normalizeElementLayout(stroke.layout)?.id;
@@ -4221,9 +4250,10 @@ var PreviewDrawingController = class {
         elementIds.add(elementId);
       }
     }
-    const lineToCanvasY = (path, line) => this.projectLineLocation(path, line, context);
+    let migratedDrawingData = null;
     if (migrated) {
       this.rebuildElementRelations();
+      migratedDrawingData = normalizeDrawingDataForStorage(this.drawingData, this.file);
     }
     const projected = [];
     const layoutsById = new Map();
@@ -4288,8 +4318,8 @@ var PreviewDrawingController = class {
     this.responsivePointsInitialized = true;
     this.responsiveLayoutSignature = signature;
     if (migrated) {
-      this.drawingData.version = Math.max(3, Number(this.drawingData.version) || 1);
-      this.plugin.scheduleDrawingSave(this.file, this.drawingData);
+      migratedDrawingData.version = Math.max(3, Number(migratedDrawingData.version) || 1);
+      this.plugin.scheduleDrawingSave(this.file, migratedDrawingData, { excludeData: this.drawingData });
     }
   }
   resizeCanvas() {
@@ -8032,6 +8062,30 @@ function normalizeDrawingData(data, file) {
     updatedAt: data?.updatedAt || null
   };
 }
+function normalizeDrawingDataForStorage(data, file) {
+  const normalized = normalizeDrawingData(data, file);
+  normalized.strokes = normalized.strokes.map((stroke) => {
+    const layout = normalizeElementLayout(stroke.layout);
+    if (!layout || elementLayoutNeedsRepair(layout) || !stroke.points.some((point) => point.anchor)) {
+      return stroke;
+    }
+    return {
+      ...stroke,
+      points: projectElementPoints(stroke.points, layout, {
+        id: layout.id,
+        x: layout.box.x,
+        y: layout.box.y,
+        width: layout.box.width,
+        height: layout.box.height,
+        scale: 1
+      }, {
+        canvasWidth: layout.sourceFrame.surfaceWidth,
+        canvasHeight: layout.sourceFrame.documentHeight
+      })
+    };
+  });
+  return normalized;
+}
 function normalizeWebEdits(value) {
   if (!Array.isArray(value)) {
     return [];
@@ -8701,9 +8755,12 @@ function captureRenderedLineLocation(anchors, canvasX, canvasY, { maxDistance = 
     return null;
   }
   const ratio = clamp((canvasY - anchor.top) / Math.max(1, anchor.height), 0, 0.999999);
+  const distance = Number(anchor.distance || 0);
+  const inside = canvasY >= anchor.top && canvasY <= anchor.bottom;
   return {
     path: anchor.path,
-    line: anchor.start + ratio * Math.max(1, anchor.end - anchor.start + 1)
+    line: anchor.start + ratio * Math.max(1, anchor.end - anchor.start + 1),
+    lineConfidence: inside ? 1 : clamp(1 - distance / Math.max(1, maxDistance), 0, 0.55)
   };
 }
 function projectRenderedLineLocation(anchors, path, line) {
@@ -8736,7 +8793,8 @@ function captureCodeMirrorLineLocation(codeMirror, clientX, clientY, sourcePath)
     const ratio = clamp((clientY - top) / Math.max(1, bottom - top), 0, 0.999999);
     return {
       path: normalizeVaultPath(sourcePath),
-      line: Math.max(0, line.number - 1) + ratio
+      line: Math.max(0, line.number - 1) + ratio,
+      lineConfidence: clientY >= top && clientY <= bottom ? 1 : 0.45
     };
   } catch (error) {
     void error;

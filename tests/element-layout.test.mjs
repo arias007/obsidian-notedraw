@@ -4,6 +4,7 @@ import {
   ELEMENT_LAYOUT_BASIS,
   captureElementRelations,
   createElementLayout,
+  elementLayoutNeedsRepair,
   normalizeElementLayout,
   projectElementLayout,
   projectElementPoints,
@@ -247,4 +248,42 @@ test("relation stabilization pulls elements together while respecting note ancho
 
   assert.ok(after[0].x > before[0].x + 20);
   assert.ok(after[0].x <= before[0].anchorX + 84);
+});
+
+test("unstable transition frames are repaired instead of trusted as source layouts", () => {
+  const layout = createElementLayout({
+    id: "unstable-frame",
+    bounds: { minX: 60, minY: 1314, maxX: 78, maxY: 1324 },
+    canvasWidth: 123,
+    canvasHeight: 2738,
+    viewportHeight: 760,
+    frame: { left: 76, width: 47.833 },
+    sourcePath: "Notes/example.md",
+    cornerLocations: {
+      topLeft: { path: "Notes/example.md", line: 0.999999 },
+      bottomLeft: { path: "Notes/example.md", line: 0.999999 }
+    }
+  });
+
+  assert.equal(elementLayoutNeedsRepair(layout), true);
+});
+
+test("large elements with all corners clamped to the same legacy line are repaired", () => {
+  const layout = createElementLayout({
+    id: "same-line-large-span",
+    bounds: { minX: 40, minY: 162, maxX: 238, maxY: 444 },
+    canvasWidth: 516,
+    canvasHeight: 1628,
+    viewportHeight: 760,
+    frame: { left: 31, width: 441 },
+    sourcePath: "Notes/example.md",
+    cornerLocations: {
+      topLeft: { path: "Notes/example.md", line: 1.999999 },
+      topRight: { path: "Notes/example.md", line: 1.999999 },
+      bottomRight: { path: "Notes/example.md", line: 1.999999 },
+      bottomLeft: { path: "Notes/example.md", line: 1.999999 }
+    }
+  });
+
+  assert.equal(elementLayoutNeedsRepair(layout), true);
 });

@@ -27,20 +27,23 @@ test("the stable v1 API exposes Cancip-friendly capabilities and events", async 
   assert.match(source, /on: \(eventName, listener\) => this\.onApiEvent\(eventName, listener\)/);
 });
 
-test("3.1.43 projects version-three element frames behind a layout signature", async () => {
+test("3.1.44 projects version-three element frames behind a layout signature", async () => {
   const [source, manifestText] = await Promise.all([
     readFile(sourceUrl, "utf8"),
     readFile(manifestUrl, "utf8")
   ]);
   const manifest = JSON.parse(manifestText);
 
-  assert.equal(manifest.version, "3.1.43");
-  assert.match(source, /version: "3\.1\.43"/);
+  assert.equal(manifest.version, "3.1.44");
+  assert.match(source, /version: "3\.1\.44"/);
   assert.match(source, /if \(!this\.responsivePointsInitialized \|\| signature !== this\.responsiveLayoutSignature\)/);
-  assert.match(source, /this\.drawingData\.version = Math\.max\(3/);
+  assert.match(source, /migratedDrawingData\.version = Math\.max\(3/);
   assert.match(source, /captureElementLayoutForStroke/);
   assert.match(source, /projectElementPoints\(stroke\.points, layout, box/);
   assert.match(source, /stabilizeElementRelations\(projected, layoutsById\)/);
+  assert.match(source, /elementLayoutNeedsRepair\(existingLayout\)/);
+  assert.match(source, /normalizeDrawingDataForStorage\(this\.drawingData, this\.file\)/);
+  assert.match(source, /scheduleDrawingSave\(this\.file, migratedDrawingData, \{ excludeData: this\.drawingData \}\)/);
   assert.match(source, /for \(const controller of this\.liveControllers\) \{\s*controller\.syncFloatingControlClasses\(\);\s*controller\.scheduleLayoutRefresh\(\)/);
   assert.match(source, /generation === this\.layoutRefreshGeneration/);
 });
@@ -49,7 +52,7 @@ test("reading and source controllers share the latest in-memory drawing state", 
   const source = await readFile(sourceUrl, "utf8");
 
   assert.match(source, /const cached = this\.drawingStateCache\.get\(path\);\s*if \(cached\) \{\s*return normalizeDrawingData\(cached, file\)/);
-  assert.match(source, /const canonical = normalizeDrawingData\(data, file\);\s*this\.drawingStateCache\.set\(path, canonical\);\s*this\.pendingDrawingSaves\.set\(path, file\);\s*this\.refreshControllersForFile\(file, canonical, \{ excludeData: data \}\)/);
+  assert.match(source, /const canonical = normalizeDrawingDataForStorage\(data, file\);\s*this\.drawingStateCache\.set\(path, canonical\);\s*this\.pendingDrawingSaves\.set\(path, file\);\s*this\.refreshControllersForFile\(file, canonical, \{ excludeData: options\.excludeData \|\| data \}\)/);
   assert.match(source, /writeDrawings\(file, compacted, \{ refresh: false, updateCache: false \}\)/);
   assert.match(source, /this\.plugin\.setControllerActivation\(this, nextActive\)/);
   assert.match(source, /this\.textPanel = createNoteDrawControlElement\(this\.floatingControlsHost, "notedraw-text-panel"\)/);
@@ -83,6 +86,7 @@ test("declared minimum Obsidian version uses compatible APIs and CSS", async () 
   assert.doesNotMatch(source, /globalThis/);
   assert.match(source, /getAbstractFileByPath/);
   assert.doesNotMatch(styles, /scrollbar-width/);
+  assert.doesNotMatch(styles, /::-webkit-scrollbar/);
 });
 
 test("floating text editing keeps one anchor and survives multiline IME input", async () => {

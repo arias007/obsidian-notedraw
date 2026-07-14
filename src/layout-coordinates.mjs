@@ -17,6 +17,31 @@ function normalizeLinePosition(value) {
   return Number.isFinite(line) && line >= 0 ? line : null;
 }
 
+function normalizeLineConfidence(value) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+  const confidence = Number(value);
+  return Number.isFinite(confidence) ? clamp(confidence, 0, 1) : null;
+}
+
+function isEndClampedLine(line) {
+  if (!Number.isFinite(line)) {
+    return false;
+  }
+  return line - Math.floor(line) >= 0.985;
+}
+
+function canTrustLineAnchor(anchor) {
+  if (anchor.line === null) {
+    return false;
+  }
+  if (anchor.lineConfidence !== null) {
+    return anchor.lineConfidence >= 0.75;
+  }
+  return !isEndClampedLine(anchor.line);
+}
+
 export function normalizeContentFrame({ surfaceWidth, contentLeft = 0, contentWidth } = {}) {
   const width = Math.max(1, finite(surfaceWidth, 1));
   const left = clamp(finite(contentLeft, 0), -width, width * 2);
@@ -35,7 +60,8 @@ export function normalizeResponsiveAnchor(anchor) {
     x: clamp(finite(anchor.x, 0), -1, 2),
     y: clamp(finite(anchor.y, 0), 0, 1),
     path: typeof anchor.path === "string" ? anchor.path : "",
-    line: normalizeLinePosition(anchor.line)
+    line: normalizeLinePosition(anchor.line),
+    lineConfidence: normalizeLineConfidence(anchor.lineConfidence)
   };
 }
 
@@ -47,6 +73,7 @@ export function createResponsivePoint({
   frame,
   sourcePath = "",
   linePosition = null,
+  lineConfidence = null,
   time = Date.now()
 }) {
   const width = Math.max(1, finite(canvasWidth, 1));
@@ -68,7 +95,8 @@ export function createResponsivePoint({
       x: clamp((finite(canvasX, 0) - normalizedFrame.left) / normalizedFrame.width, -1, 2),
       y,
       path: typeof sourcePath === "string" ? sourcePath : "",
-      line: normalizeLinePosition(linePosition)
+      line: normalizeLinePosition(linePosition),
+      lineConfidence: normalizeLineConfidence(lineConfidence)
     }
   };
 }
@@ -102,11 +130,13 @@ export function projectResponsivePoint(point, {
   // Versions 3.1.38-3.1.39 serialized a missing line as 0. Reject implausible
   // line-zero jumps while preserving real anchors created near the first line.
   const firstLineIsPlausible = anchor.line === null || anchor.line >= 1 || anchor.y <= 0.15;
+  const lineAnchorIsReliable = canTrustLineAnchor(anchor);
   const lineShiftIsPlausible = anchor.line !== null && anchor.line >= 1
     ? true
     : Math.abs(anchoredY - fallbackCanvasY) <= Math.max(96, height * 0.18);
   const canUseLineAnchor = Number.isFinite(anchoredY) &&
     firstLineIsPlausible &&
+    lineAnchorIsReliable &&
     lineShiftIsPlausible;
   const canvasY = canUseLineAnchor ? anchoredY : fallbackCanvasY;
   return {

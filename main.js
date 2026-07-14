@@ -151,6 +151,28 @@ function normalizeLinePosition(value) {
   const line = Number(value);
   return Number.isFinite(line) && line >= 0 ? line : null;
 }
+function normalizeLineConfidence(value) {
+  if (value === null || value === void 0 || value === "") {
+    return null;
+  }
+  const confidence = Number(value);
+  return Number.isFinite(confidence) ? clamp2(confidence, 0, 1) : null;
+}
+function isEndClampedLine(line) {
+  if (!Number.isFinite(line)) {
+    return false;
+  }
+  return line - Math.floor(line) >= 0.985;
+}
+function canTrustLineAnchor(anchor) {
+  if (anchor.line === null) {
+    return false;
+  }
+  if (anchor.lineConfidence !== null) {
+    return anchor.lineConfidence >= 0.75;
+  }
+  return !isEndClampedLine(anchor.line);
+}
 function normalizeContentFrame({ surfaceWidth, contentLeft = 0, contentWidth } = {}) {
   const width = Math.max(1, finite(surfaceWidth, 1));
   const left = clamp2(finite(contentLeft, 0), -width, width * 2);
@@ -168,7 +190,8 @@ function normalizeResponsiveAnchor(anchor) {
     x: clamp2(finite(anchor.x, 0), -1, 2),
     y: clamp2(finite(anchor.y, 0), 0, 1),
     path: typeof anchor.path === "string" ? anchor.path : "",
-    line: normalizeLinePosition(anchor.line)
+    line: normalizeLinePosition(anchor.line),
+    lineConfidence: normalizeLineConfidence(anchor.lineConfidence)
   };
 }
 function createResponsivePoint({
@@ -179,6 +202,7 @@ function createResponsivePoint({
   frame,
   sourcePath = "",
   linePosition = null,
+  lineConfidence = null,
   time = Date.now()
 }) {
   const width = Math.max(1, finite(canvasWidth, 1));
@@ -200,7 +224,8 @@ function createResponsivePoint({
       x: clamp2((finite(canvasX, 0) - normalizedFrame.left) / normalizedFrame.width, -1, 2),
       y,
       path: typeof sourcePath === "string" ? sourcePath : "",
-      line: normalizeLinePosition(linePosition)
+      line: normalizeLinePosition(linePosition),
+      lineConfidence: normalizeLineConfidence(lineConfidence)
     }
   };
 }
@@ -229,8 +254,9 @@ function projectResponsivePoint(point, {
   const canvasX = normalizedFrame.left + anchor.x * normalizedFrame.width;
   const fallbackCanvasY = anchor.y * height;
   const firstLineIsPlausible = anchor.line === null || anchor.line >= 1 || anchor.y <= 0.15;
+  const lineAnchorIsReliable = canTrustLineAnchor(anchor);
   const lineShiftIsPlausible = anchor.line !== null && anchor.line >= 1 ? true : Math.abs(anchoredY - fallbackCanvasY) <= Math.max(96, height * 0.18);
-  const canUseLineAnchor = Number.isFinite(anchoredY) && firstLineIsPlausible && lineShiftIsPlausible;
+  const canUseLineAnchor = Number.isFinite(anchoredY) && firstLineIsPlausible && lineAnchorIsReliable && lineShiftIsPlausible;
   const canvasY = canUseLineAnchor ? anchoredY : fallbackCanvasY;
   return {
     ...point,
@@ -258,6 +284,28 @@ function normalizeLine(value) {
   const number = Number(value);
   return Number.isFinite(number) && number >= 0 ? number : null;
 }
+function normalizeLineConfidence2(value) {
+  if (value === null || value === void 0 || value === "") {
+    return null;
+  }
+  const number = Number(value);
+  return Number.isFinite(number) ? clamp3(number, 0, 1) : null;
+}
+function isEndClampedLine2(line) {
+  if (!Number.isFinite(line)) {
+    return false;
+  }
+  return line - Math.floor(line) >= 0.985;
+}
+function canTrustCornerLine(corner) {
+  if (!corner || corner.line === null) {
+    return false;
+  }
+  if (corner.lineConfidence !== null) {
+    return corner.lineConfidence >= 0.75;
+  }
+  return !isEndClampedLine2(corner.line);
+}
 function normalizeFrame(frame = {}) {
   const surfaceWidth = Math.max(1, finite2(frame.surfaceWidth, frame.width || 1));
   const contentLeft = clamp3(finite2(frame.contentLeft, frame.left || 0), -surfaceWidth, surfaceWidth * 2);
@@ -281,7 +329,8 @@ function normalizeCorner(corner) {
     x: clamp3(finite2(corner.x, 0), -2, 3),
     y: clamp3(finite2(corner.y, 0), 0, 1),
     path: typeof corner.path === "string" ? corner.path : "",
-    line: normalizeLine(corner.line)
+    line: normalizeLine(corner.line),
+    lineConfidence: normalizeLineConfidence2(corner.lineConfidence)
   };
 }
 function normalizeBox(box = {}) {
@@ -380,7 +429,8 @@ function createElementLayout({
       x: clamp3((positions[name].x - sourceFrame.contentLeft) / sourceFrame.contentWidth, -2, 3),
       y: clamp3(positions[name].y / documentHeight, 0, 1),
       path: typeof location.path === "string" && location.path ? location.path : sourcePath,
-      line: normalizeLine(location.line)
+      line: normalizeLine(location.line),
+      lineConfidence: normalizeLineConfidence2(location.lineConfidence ?? location.confidence)
     };
   }
   return normalizeElementLayout({
@@ -403,15 +453,37 @@ function projectCorner(corner, target, lineToCanvasY) {
   const fallbackY = corner.y * frame.documentHeight;
   const lineY = corner.line !== null && typeof lineToCanvasY === "function" ? Number(lineToCanvasY(corner.path, corner.line)) : NaN;
   const firstLineIsPlausible = corner.line === null || corner.line >= 1 || corner.y <= 0.15;
+  const lineIsReliable = canTrustCornerLine(corner);
   const maxLineShift = Math.max(96, Math.min(frame.documentHeight * 0.18, frame.viewportHeight * 0.45));
   const lineShiftIsPlausible = corner.line !== null && corner.line >= 1 ? true : Math.abs(lineY - fallbackY) <= maxLineShift;
-  const canUseLine = Number.isFinite(lineY) && firstLineIsPlausible && lineShiftIsPlausible;
+  const canUseLine = Number.isFinite(lineY) && firstLineIsPlausible && lineIsReliable && lineShiftIsPlausible;
   return {
     x: frame.contentLeft + corner.x * frame.contentWidth,
     y: canUseLine ? lineY : fallbackY,
     fallbackY,
     lineAnchored: canUseLine
   };
+}
+function elementLayoutNeedsRepair(layoutInput) {
+  const layout = normalizeElementLayout(layoutInput);
+  if (!layout) {
+    return true;
+  }
+  const frame = layout.sourceFrame;
+  if (frame.surfaceWidth < 180 || frame.contentWidth < 140 || frame.contentWidth / frame.surfaceWidth < 0.42) {
+    return true;
+  }
+  const verticalSpan = layout.box.height / Math.max(1, frame.documentHeight);
+  const corners = Object.values(layout.corners).filter(Boolean);
+  if (corners.some((corner) => corner.line !== null && corner.lineConfidence === null && isEndClampedLine2(corner.line) && corner.y > 0.08)) {
+    return true;
+  }
+  const topLine = layout.corners.topLeft?.line;
+  const bottomLine = layout.corners.bottomLeft?.line;
+  if (Number.isFinite(topLine) && Number.isFinite(bottomLine) && Math.floor(topLine) === Math.floor(bottomLine) && verticalSpan > 0.08) {
+    return true;
+  }
+  return false;
 }
 function calculateElementScale(sourceFrameInput, targetFrameInput, boxInput = {}) {
   const source = normalizeFrame(sourceFrameInput);
@@ -2093,7 +2165,7 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
       on: (eventName, listener) => this.onApiEvent(eventName, listener)
     };
     return {
-      version: "3.1.43",
+      version: "3.1.44",
       apiVersion: v1.apiVersion,
       capabilities,
       v1,
@@ -2701,12 +2773,12 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
       return createEmptyDrawingData(file);
     }
   }
-  scheduleDrawingSave(file, data) {
+  scheduleDrawingSave(file, data, options = {}) {
     const path = this.drawingPathForFile(file);
-    const canonical = normalizeDrawingData(data, file);
+    const canonical = normalizeDrawingDataForStorage(data, file);
     this.drawingStateCache.set(path, canonical);
     this.pendingDrawingSaves.set(path, file);
-    this.refreshControllersForFile(file, canonical, { excludeData: data });
+    this.refreshControllersForFile(file, canonical, { excludeData: options.excludeData || data });
     const previous = this.saveTimers.get(path);
     if (previous) {
       window.clearTimeout(previous);
@@ -2732,7 +2804,7 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
       if (!latest) {
         return;
       }
-      const compacted = normalizeDrawingData(latest, file);
+      const compacted = normalizeDrawingDataForStorage(latest, file);
       compactDrawingData(compacted, this.noteDrawSettings?.drawingCompactDistance ?? DEFAULT_SETTINGS.drawingCompactDistance);
       await this.writeDrawings(file, compacted, { refresh: false, updateCache: false });
     });
@@ -2748,7 +2820,7 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
   async writeDrawings(file, data, options = {}) {
     await this.ensureDrawingDir();
     const path = this.drawingPathForFile(file);
-    const normalized = normalizeDrawingData(data, file);
+    const normalized = normalizeDrawingDataForStorage(data, file);
     const updatedAt = (/* @__PURE__ */ new Date()).toISOString();
     normalized.updatedAt = updatedAt;
     if (options.updateCache !== false) {
@@ -4864,6 +4936,7 @@ var PreviewDrawingController = class {
         frame: context.frame,
         sourcePath: lineLocation?.path || this.file?.path || "",
         linePosition: lineLocation?.line ?? null,
+        lineConfidence: lineLocation?.lineConfidence ?? null,
         time: point?.t
       })
     };
@@ -4879,7 +4952,7 @@ var PreviewDrawingController = class {
     }
     this.rebuildElementRelations();
   }
-  captureElementLayoutForStroke(stroke, context = this.getResponsiveLayoutContext(), index = -1) {
+  captureElementLayoutForStroke(stroke, context = this.getResponsiveLayoutContext(), index = -1, options = {}) {
     const bounds = getStrokeBounds(stroke, this.canvasWidth(), this.canvasHeight());
     if (!bounds) {
       return null;
@@ -4911,7 +4984,7 @@ var PreviewDrawingController = class {
         previewWidth: stroke.previewWidth,
         previewHeight: stroke.previewHeight
       },
-      relations: previous?.relations || []
+      relations: options.preserveRelations === false ? [] : previous?.relations || []
     });
     return stroke.layout;
   }
@@ -4945,6 +5018,26 @@ var PreviewDrawingController = class {
       }
     }
   }
+  projectStrokePointsForLayoutRepair(stroke, context, layout) {
+    const lineToCanvasY = (path, line) => this.projectLineLocation(path, line, context);
+    const sourceFrame = layout?.sourceFrame;
+    const trustAnchorX = Boolean(sourceFrame) && isStableResponsiveCaptureFrame(sourceFrame.surfaceWidth, { width: sourceFrame.contentWidth });
+    return (Array.isArray(stroke?.points) ? stroke.points : []).map((point) => {
+      const projected = projectResponsivePoint(point, {
+        canvasWidth: this.canvasWidth(),
+        canvasHeight: this.canvasHeight(),
+        frame: context.frame,
+        lineToCanvasY
+      });
+      if (trustAnchorX || !point?.anchor) {
+        return projected;
+      }
+      return {
+        ...projected,
+        x: clamp5(Number(point.x), 0, 1)
+      };
+    });
+  }
   initializeAndProjectResponsivePoints(context, signature) {
     let migrated = false;
     const elementIds = /* @__PURE__ */ new Set();
@@ -4953,15 +5046,22 @@ var PreviewDrawingController = class {
       this.responsiveLayoutSignature = "";
       return;
     }
+    const lineToCanvasY = (path, line) => this.projectLineLocation(path, line, context);
     for (const [index, stroke] of (this.drawingData?.strokes || []).entries()) {
       const existingLayout = normalizeElementLayout(stroke.layout);
-      const hasUniqueElementLayout = Boolean(existingLayout?.id) && !elementIds.has(existingLayout.id);
+      const needsLayoutRepair = Boolean(existingLayout) && elementLayoutNeedsRepair(existingLayout);
+      const hasUniqueElementLayout = Boolean(existingLayout?.id) && !elementIds.has(existingLayout.id) && !needsLayoutRepair;
       if (!hasUniqueElementLayout) {
-        if (existingLayout) {
+        if (needsLayoutRepair) {
+          stroke.points = this.projectStrokePointsForLayoutRepair(stroke, context, existingLayout);
+          stroke.layout = null;
+        } else if (existingLayout) {
           stroke.layout = { ...existingLayout, id: "" };
         }
-        stroke.points = stroke.points.map((point) => this.captureResponsivePoint(point, context));
-        this.captureElementLayoutForStroke(stroke, context, index);
+        if (!needsLayoutRepair) {
+          stroke.points = stroke.points.map((point) => this.captureResponsivePoint(point, context));
+        }
+        this.captureElementLayoutForStroke(stroke, context, index, { preserveRelations: !needsLayoutRepair });
         migrated = true;
       }
       const elementId = normalizeElementLayout(stroke.layout)?.id;
@@ -4969,9 +5069,10 @@ var PreviewDrawingController = class {
         elementIds.add(elementId);
       }
     }
-    const lineToCanvasY = (path, line) => this.projectLineLocation(path, line, context);
+    let migratedDrawingData = null;
     if (migrated) {
       this.rebuildElementRelations();
+      migratedDrawingData = normalizeDrawingDataForStorage(this.drawingData, this.file);
     }
     const projected = [];
     const layoutsById = /* @__PURE__ */ new Map();
@@ -5036,8 +5137,8 @@ var PreviewDrawingController = class {
     this.responsivePointsInitialized = true;
     this.responsiveLayoutSignature = signature;
     if (migrated) {
-      this.drawingData.version = Math.max(3, Number(this.drawingData.version) || 1);
-      this.plugin.scheduleDrawingSave(this.file, this.drawingData);
+      migratedDrawingData.version = Math.max(3, Number(migratedDrawingData.version) || 1);
+      this.plugin.scheduleDrawingSave(this.file, migratedDrawingData, { excludeData: this.drawingData });
     }
   }
   resizeCanvas() {
@@ -8773,6 +8874,30 @@ function normalizeDrawingData(data, file) {
     updatedAt: data?.updatedAt || null
   };
 }
+function normalizeDrawingDataForStorage(data, file) {
+  const normalized = normalizeDrawingData(data, file);
+  normalized.strokes = normalized.strokes.map((stroke) => {
+    const layout = normalizeElementLayout(stroke.layout);
+    if (!layout || elementLayoutNeedsRepair(layout) || !stroke.points.some((point) => point.anchor)) {
+      return stroke;
+    }
+    return {
+      ...stroke,
+      points: projectElementPoints(stroke.points, layout, {
+        id: layout.id,
+        x: layout.box.x,
+        y: layout.box.y,
+        width: layout.box.width,
+        height: layout.box.height,
+        scale: 1
+      }, {
+        canvasWidth: layout.sourceFrame.surfaceWidth,
+        canvasHeight: layout.sourceFrame.documentHeight
+      })
+    };
+  });
+  return normalized;
+}
 function normalizeWebEdits(value) {
   if (!Array.isArray(value)) {
     return [];
@@ -9442,9 +9567,12 @@ function captureRenderedLineLocation(anchors, canvasX, canvasY, { maxDistance = 
     return null;
   }
   const ratio = clamp5((canvasY - anchor.top) / Math.max(1, anchor.height), 0, 0.999999);
+  const distance = Number(anchor.distance || 0);
+  const inside = canvasY >= anchor.top && canvasY <= anchor.bottom;
   return {
     path: anchor.path,
-    line: anchor.start + ratio * Math.max(1, anchor.end - anchor.start + 1)
+    line: anchor.start + ratio * Math.max(1, anchor.end - anchor.start + 1),
+    lineConfidence: inside ? 1 : clamp5(1 - distance / Math.max(1, maxDistance), 0, 0.55)
   };
 }
 function projectRenderedLineLocation(anchors, path, line) {
@@ -9477,7 +9605,8 @@ function captureCodeMirrorLineLocation(codeMirror, clientX, clientY, sourcePath)
     const ratio = clamp5((clientY - top) / Math.max(1, bottom - top), 0, 0.999999);
     return {
       path: normalizeVaultPath(sourcePath),
-      line: Math.max(0, line.number - 1) + ratio
+      line: Math.max(0, line.number - 1) + ratio,
+      lineConfidence: clientY >= top && clientY <= bottom ? 1 : 0.45
     };
   } catch (error) {
     void error;
