@@ -212,10 +212,14 @@ function projectCorner(corner, target, lineToCanvasY, sourceInput = null, prefer
     const source = normalizeFrame(sourceInput);
     const sourceY = corner.y * source.documentHeight;
     const widthScale = clamp(frame.contentWidth / source.contentWidth, 0.2, 5);
-    const viewportScale = clamp(frame.viewportHeight / source.viewportHeight, 0.25, 4);
-    const documentScale = clamp(frame.documentHeight / source.documentHeight, 0.28, 3.6);
-    const laneScale = Math.exp(Math.log(widthScale) * 0.38 + Math.log(viewportScale) * 0.62);
-    const fallbackScale = blendScale(laneScale, documentScale, preferDocumentFlow ? 0.78 : 0.04);
+    const sameContentLane = widthScale >= 0.82 && widthScale <= 1.2;
+    // Reading/source mode, a software keyboard, or a short split pane can change
+    // viewport height without moving the Markdown content itself. Keep the note
+    // coordinate fixed for the same lane and only follow reflow across real
+    // content-width changes.
+    const fallbackScale = sameContentLane
+      ? 1
+      : clamp(1 / widthScale, 0.48, 2.2);
     fallbackY = clamp(sourceY * fallbackScale, 0, frame.documentHeight);
   }
   const lineY = corner.line !== null && typeof lineToCanvasY === "function"
@@ -328,9 +332,9 @@ export function calculateElementScales(sourceFrameInput, targetFrameInput, boxIn
   xScale = clamp(Math.min(xScale, fitScale), 0.34, 2.8);
   yScale = clamp(yScale, 0.34, 2.8);
   if (sameContentLane) {
-    xScale = clamp(blendScale(xScale, widthScale, 0.72), widthScale * 0.9, widthScale * 1.1);
-    yScale = clamp(blendScale(yScale, widthScale, 0.82), widthScale * 0.9, widthScale * 1.12);
-    scale = calculateVisualScale(xScale, yScale, widthScale);
+    xScale = widthScale;
+    yScale = widthScale;
+    scale = widthScale;
   }
   if (portraitTarget) {
     return clampAxisRatio({ xScale, yScale, scale }, { maxXOverY: 1.25, maxYOverX: 2.15 });
@@ -400,9 +404,9 @@ export function projectElementLayout(layoutInput, {
     ? { maxXOverY: 1.25, maxYOverX: 2.15 }
     : targetIsWide ? { maxXOverY: 1.75, maxYOverX: 1.45 } : { maxXOverY: 1.55, maxYOverX: 1.65 }));
   if (sameContentLane) {
-    xScale = clamp(blendScale(xScale, contentWidthScale, 0.5), contentWidthScale * 0.88, contentWidthScale * 1.12);
-    yScale = clamp(blendScale(yScale, contentWidthScale, 0.62), contentWidthScale * 0.96, contentWidthScale * 1.08);
-    scale = calculateVisualScale(xScale, yScale, contentWidthScale);
+    xScale = contentWidthScale;
+    yScale = contentWidthScale;
+    scale = contentWidthScale;
   }
   const fitXScale = targetFrame.contentWidth * 0.98 / Math.max(1, layout.box.width);
   if (xScale > fitXScale) {
@@ -420,6 +424,7 @@ export function projectElementLayout(layoutInput, {
   const maxY = Math.max(0, targetFrame.documentHeight - height);
   const clampedX = clamp(x, 0, maxX);
   const clampedY = clamp(y, 0, maxY);
+  const anchorStrength = primary.lineAnchored ? 1 : sameContentLane ? 0.94 : 0.68;
   return {
     id: layout.id,
     x: clampedX,
@@ -431,6 +436,8 @@ export function projectElementLayout(layoutInput, {
     yScale,
     anchorX: clampedX,
     anchorY: clampedY,
+    anchorStrength,
+    sameContentLane,
     primaryAnchoredToLine: primary.lineAnchored
   };
 }
@@ -591,6 +598,13 @@ export function stabilizeElementRelations(projectedItems, layouts) {
     : new Map((Array.isArray(layouts) ? layouts : []).map((layout) => [layout?.id, layout]));
   const corrections = new Map();
   const visitedPairs = new Set();
+  const anchorStrengthFor = (item) => {
+    const value = Number(item?.anchorStrength);
+    if (Number.isFinite(value)) {
+      return clamp(value, 0, 1);
+    }
+    return item?.primaryAnchoredToLine ? 0.8 : 0.35;
+  };
   const addCorrection = (id, x, y, strength) => {
     const current = corrections.get(id) || { x: 0, y: 0, weight: 0 };
     current.x += x * strength;
@@ -628,8 +642,8 @@ export function stabilizeElementRelations(projectedItems, layouts) {
       const strength = relation.kind === "near"
         ? clamp(relation.weight * 1.7, 0.16, 0.34)
         : clamp(relation.weight * 1.7, 0.32, 0.62);
-      const sourceMobility = source.primaryAnchoredToLine ? 0.55 : 1;
-      const targetMobility = target.primaryAnchoredToLine ? 0.55 : 1;
+      const sourceMobility = clamp(1 - anchorStrengthFor(source) * 0.78, 0.18, 1);
+      const targetMobility = clamp(1 - anchorStrengthFor(target) * 0.78, 0.18, 1);
       const mobility = Math.max(0.01, sourceMobility + targetMobility);
       const sourceShare = sourceMobility / mobility;
       const targetShare = targetMobility / mobility;
@@ -645,11 +659,13 @@ export function stabilizeElementRelations(projectedItems, layouts) {
       return item;
     }
     const divisor = Math.max(0.001, correction.weight);
-    const blend = Math.min(item.primaryAnchoredToLine ? 0.58 : 0.78, correction.weight);
+    const anchorStrength = anchorStrengthFor(item);
+    const blend = Math.min(0.82 - anchorStrength * 0.34, correction.weight);
     const nextX = item.x + (correction.x / divisor) * blend;
     const nextY = item.y + (correction.y / divisor) * blend;
-    const anchorFenceX = Math.max(36, Math.min(120, item.width * (item.primaryAnchoredToLine ? 0.7 : 1.2)));
-    const anchorFenceY = Math.max(36, Math.min(140, item.height * (item.primaryAnchoredToLine ? 0.8 : 1.5)));
+    const fenceRatio = 0.18 + (1 - anchorStrength) * 0.82;
+    const anchorFenceX = Math.max(12, Math.min(anchorStrength >= 0.9 ? 36 : anchorStrength >= 0.65 ? 72 : 120, item.width * fenceRatio));
+    const anchorFenceY = Math.max(12, Math.min(anchorStrength >= 0.9 ? 40 : anchorStrength >= 0.65 ? 84 : 140, item.height * fenceRatio));
     return {
       ...item,
       x: Number.isFinite(item.anchorX) ? clamp(nextX, item.anchorX - anchorFenceX, item.anchorX + anchorFenceX) : nextX,

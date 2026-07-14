@@ -208,11 +208,11 @@ test("reading and editing surfaces with similar content width keep visual text s
   });
   const metrics = scaleElementMetrics(layout.metrics, projected);
 
-  assert.ok(projected.yScale < projected.xScale, "document-height differences may still flatten the element box");
-  assert.ok(projected.yScale >= 0.96, "same-width reading and editing surfaces keep element height nearly unchanged");
-  assert.ok(projected.scale >= 0.94, "visual scale is protected from reading-view height shrinkage");
-  assert.ok(metrics.fontSize >= 18.8);
-  assert.ok(metrics.textWidth >= 210);
+  assert.equal(projected.xScale, 1);
+  assert.equal(projected.yScale, 1, "view-only document-height differences cannot reshape an element");
+  assert.equal(projected.scale, 1, "visual scale stays identical across the same Markdown lane");
+  assert.equal(metrics.fontSize, 20);
+  assert.equal(metrics.textWidth, 220);
 });
 
 test("same-width view changes do not let different Markdown line heights shrink elements", () => {
@@ -276,7 +276,107 @@ test("desktop reading and editing heights do not shift an unanchored element as 
   });
 
   assert.ok(Math.abs(reading.y - editing.y) < 16, "desktop mode differences stay nearly neutral");
-  assert.ok(mobile.y > reading.y * 1.35, "mobile still follows the taller reflowed document");
+  assert.ok(mobile.y > reading.y * 1.2, "a narrower mobile lane still lengthens the note coordinate");
+});
+
+test("same Markdown lane ignores view height and software keyboard changes", () => {
+  const layout = createElementLayout({
+    id: "same-lane-viewport-parity",
+    bounds: { minX: 97, minY: 441, maxX: 277, maxY: 464 },
+    canvasWidth: 360,
+    canvasHeight: 3006,
+    viewportHeight: 462,
+    frame: { left: 24, width: 301 }
+  });
+  const editing = projectElementLayout(layout, {
+    canvasWidth: 360,
+    canvasHeight: 3006,
+    viewportHeight: 462,
+    frame: { left: 24, width: 301 },
+    preferDocumentFlow: false
+  });
+  const reading = projectElementLayout(layout, {
+    canvasWidth: 360,
+    canvasHeight: 1455,
+    viewportHeight: 789,
+    frame: { left: 24, width: 301 },
+    preferDocumentFlow: false
+  });
+  const mobileReading = projectElementLayout(layout, {
+    canvasWidth: 360,
+    canvasHeight: 1455,
+    viewportHeight: 789,
+    frame: { left: 24, width: 301 },
+    preferDocumentFlow: true
+  });
+
+  assert.equal(editing.y, 441);
+  assert.equal(reading.y, editing.y);
+  assert.equal(mobileReading.y, editing.y);
+});
+
+test("mixed capture frames retain absolute and relative positions across view modes", () => {
+  const first = createElementLayout({
+    id: "mixed-frame-a",
+    bounds: { minX: 90, minY: 420, maxX: 210, maxY: 500 },
+    canvasWidth: 360,
+    canvasHeight: 1455,
+    viewportHeight: 789,
+    frame: { left: 24, width: 301 }
+  });
+  const second = createElementLayout({
+    id: "mixed-frame-b",
+    bounds: { minX: 220, minY: 430, maxX: 330, maxY: 505 },
+    canvasWidth: 360,
+    canvasHeight: 3006,
+    viewportHeight: 462,
+    frame: { left: 24, width: 301 }
+  });
+  const relations = captureElementRelations([
+    { id: first.id, bounds: { minX: 90, minY: 420, maxX: 210, maxY: 500 } },
+    { id: second.id, bounds: { minX: 220, minY: 430, maxX: 330, maxY: 505 } }
+  ]);
+  first.relations = relations.get(first.id);
+  second.relations = relations.get(second.id);
+  const layouts = new Map([[first.id, first], [second.id, second]]);
+  const project = (canvasHeight, viewportHeight) => stabilizeElementRelations([
+    projectElementLayout(first, {
+      canvasWidth: 360,
+      canvasHeight,
+      viewportHeight,
+      frame: { left: 24, width: 301 },
+      preferDocumentFlow: false
+    }),
+    projectElementLayout(second, {
+      canvasWidth: 360,
+      canvasHeight,
+      viewportHeight,
+      frame: { left: 24, width: 301 },
+      preferDocumentFlow: false
+    })
+  ], layouts);
+  const editing = project(3006, 462);
+  const reading = project(1455, 789);
+
+  assert.ok(Math.abs(reading[0].y - editing[0].y) < 0.001);
+  assert.ok(Math.abs(reading[1].y - editing[1].y) < 0.001);
+  assert.ok(Math.abs((reading[1].y - reading[0].y) - (editing[1].y - editing[0].y)) < 0.001);
+});
+
+test("element relations cannot override a strong note-lane anchor", () => {
+  const first = makeLayout("strong-anchor-a", 100, 100, 120, 100);
+  const second = makeLayout("strong-anchor-b", 240, 100, 120, 100);
+  first.relations = [{ targetId: second.id, kind: "near", sourceCorner: "topRight", targetCorner: "topLeft", dx: 500, dy: 500, weight: 0.4 }];
+  const before = [
+    { id: first.id, x: 100, y: 100, width: 120, height: 100, scale: 1, xScale: 1, yScale: 1, anchorX: 100, anchorY: 100, anchorStrength: 0.94 },
+    { id: second.id, x: 240, y: 100, width: 120, height: 100, scale: 1, xScale: 1, yScale: 1, anchorX: 240, anchorY: 100, anchorStrength: 0.94 }
+  ];
+  const after = stabilizeElementRelations(before, new Map([[first.id, first], [second.id, second]]));
+
+  for (let index = 0; index < after.length; index += 1) {
+    assert.ok(Math.abs(after[index].x - before[index].x) <= 36);
+    assert.ok(Math.abs(after[index].y - before[index].y) <= 40);
+  }
 });
 
 test("reciprocal relation cycles reduce drift without diverging", () => {

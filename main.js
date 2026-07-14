@@ -481,10 +481,8 @@ function projectCorner(corner, target, lineToCanvasY, sourceInput = null, prefer
     const source = normalizeFrame(sourceInput);
     const sourceY = corner.y * source.documentHeight;
     const widthScale = clamp3(frame.contentWidth / source.contentWidth, 0.2, 5);
-    const viewportScale = clamp3(frame.viewportHeight / source.viewportHeight, 0.25, 4);
-    const documentScale = clamp3(frame.documentHeight / source.documentHeight, 0.28, 3.6);
-    const laneScale = Math.exp(Math.log(widthScale) * 0.38 + Math.log(viewportScale) * 0.62);
-    const fallbackScale = blendScale(laneScale, documentScale, preferDocumentFlow ? 0.78 : 0.04);
+    const sameContentLane = widthScale >= 0.82 && widthScale <= 1.2;
+    const fallbackScale = sameContentLane ? 1 : clamp3(1 / widthScale, 0.48, 2.2);
     fallbackY = clamp3(sourceY * fallbackScale, 0, frame.documentHeight);
   }
   const lineY = corner.line !== null && typeof lineToCanvasY === "function" ? Number(lineToCanvasY(corner.path, corner.line)) : NaN;
@@ -580,9 +578,9 @@ function calculateElementScales(sourceFrameInput, targetFrameInput, boxInput = {
   xScale = clamp3(Math.min(xScale, fitScale), 0.34, 2.8);
   yScale = clamp3(yScale, 0.34, 2.8);
   if (sameContentLane) {
-    xScale = clamp3(blendScale(xScale, widthScale, 0.72), widthScale * 0.9, widthScale * 1.1);
-    yScale = clamp3(blendScale(yScale, widthScale, 0.82), widthScale * 0.9, widthScale * 1.12);
-    scale = calculateVisualScale(xScale, yScale, widthScale);
+    xScale = widthScale;
+    yScale = widthScale;
+    scale = widthScale;
   }
   if (portraitTarget) {
     return clampAxisRatio({ xScale, yScale, scale }, { maxXOverY: 1.25, maxYOverX: 2.15 });
@@ -649,9 +647,9 @@ function projectElementLayout(layoutInput, {
   const sameContentLane = contentWidthScale >= 0.82 && contentWidthScale <= 1.2;
   ({ xScale, yScale, scale } = clampAxisRatio({ xScale, yScale, scale }, targetIsPortrait ? { maxXOverY: 1.25, maxYOverX: 2.15 } : targetIsWide ? { maxXOverY: 1.75, maxYOverX: 1.45 } : { maxXOverY: 1.55, maxYOverX: 1.65 }));
   if (sameContentLane) {
-    xScale = clamp3(blendScale(xScale, contentWidthScale, 0.5), contentWidthScale * 0.88, contentWidthScale * 1.12);
-    yScale = clamp3(blendScale(yScale, contentWidthScale, 0.62), contentWidthScale * 0.96, contentWidthScale * 1.08);
-    scale = calculateVisualScale(xScale, yScale, contentWidthScale);
+    xScale = contentWidthScale;
+    yScale = contentWidthScale;
+    scale = contentWidthScale;
   }
   const fitXScale = targetFrame.contentWidth * 0.98 / Math.max(1, layout.box.width);
   if (xScale > fitXScale) {
@@ -669,6 +667,7 @@ function projectElementLayout(layoutInput, {
   const maxY = Math.max(0, targetFrame.documentHeight - height);
   const clampedX = clamp3(x, 0, maxX);
   const clampedY = clamp3(y, 0, maxY);
+  const anchorStrength = primary.lineAnchored ? 1 : sameContentLane ? 0.94 : 0.68;
   return {
     id: layout.id,
     x: clampedX,
@@ -680,6 +679,8 @@ function projectElementLayout(layoutInput, {
     yScale,
     anchorX: clampedX,
     anchorY: clampedY,
+    anchorStrength,
+    sameContentLane,
     primaryAnchoredToLine: primary.lineAnchored
   };
 }
@@ -829,6 +830,13 @@ function stabilizeElementRelations(projectedItems, layouts) {
   const layoutsById = layouts instanceof Map ? layouts : new Map((Array.isArray(layouts) ? layouts : []).map((layout) => [layout?.id, layout]));
   const corrections = /* @__PURE__ */ new Map();
   const visitedPairs = /* @__PURE__ */ new Set();
+  const anchorStrengthFor = (item) => {
+    const value = Number(item?.anchorStrength);
+    if (Number.isFinite(value)) {
+      return clamp3(value, 0, 1);
+    }
+    return item?.primaryAnchoredToLine ? 0.8 : 0.35;
+  };
   const addCorrection = (id, x, y, strength) => {
     const current = corrections.get(id) || { x: 0, y: 0, weight: 0 };
     current.x += x * strength;
@@ -860,8 +868,8 @@ function stabilizeElementRelations(projectedItems, layouts) {
       const limitX = relation.kind === "near" ? Math.min(72, Math.max(24, Math.min(source.width, target.width) * 0.35)) : Math.min(96, Math.max(32, Math.min(source.width, target.width) * 0.5));
       const limitY = relation.kind === "near" ? Math.min(72, Math.max(24, Math.min(source.height, target.height) * 0.35)) : Math.min(96, Math.max(32, Math.min(source.height, target.height) * 0.5));
       const strength = relation.kind === "near" ? clamp3(relation.weight * 1.7, 0.16, 0.34) : clamp3(relation.weight * 1.7, 0.32, 0.62);
-      const sourceMobility = source.primaryAnchoredToLine ? 0.55 : 1;
-      const targetMobility = target.primaryAnchoredToLine ? 0.55 : 1;
+      const sourceMobility = clamp3(1 - anchorStrengthFor(source) * 0.78, 0.18, 1);
+      const targetMobility = clamp3(1 - anchorStrengthFor(target) * 0.78, 0.18, 1);
       const mobility = Math.max(0.01, sourceMobility + targetMobility);
       const sourceShare = sourceMobility / mobility;
       const targetShare = targetMobility / mobility;
@@ -877,11 +885,13 @@ function stabilizeElementRelations(projectedItems, layouts) {
       return item;
     }
     const divisor = Math.max(1e-3, correction.weight);
-    const blend = Math.min(item.primaryAnchoredToLine ? 0.58 : 0.78, correction.weight);
+    const anchorStrength = anchorStrengthFor(item);
+    const blend = Math.min(0.82 - anchorStrength * 0.34, correction.weight);
     const nextX = item.x + correction.x / divisor * blend;
     const nextY = item.y + correction.y / divisor * blend;
-    const anchorFenceX = Math.max(36, Math.min(120, item.width * (item.primaryAnchoredToLine ? 0.7 : 1.2)));
-    const anchorFenceY = Math.max(36, Math.min(140, item.height * (item.primaryAnchoredToLine ? 0.8 : 1.5)));
+    const fenceRatio = 0.18 + (1 - anchorStrength) * 0.82;
+    const anchorFenceX = Math.max(12, Math.min(anchorStrength >= 0.9 ? 36 : anchorStrength >= 0.65 ? 72 : 120, item.width * fenceRatio));
+    const anchorFenceY = Math.max(12, Math.min(anchorStrength >= 0.9 ? 40 : anchorStrength >= 0.65 ? 84 : 140, item.height * fenceRatio));
     return {
       ...item,
       x: Number.isFinite(item.anchorX) ? clamp3(nextX, item.anchorX - anchorFenceX, item.anchorX + anchorFenceX) : nextX,
@@ -2348,7 +2358,7 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
       on: (eventName, listener) => this.onApiEvent(eventName, listener)
     };
     return {
-      version: "3.1.48",
+      version: "3.1.49",
       apiVersion: v1.apiVersion,
       capabilities,
       v1,
