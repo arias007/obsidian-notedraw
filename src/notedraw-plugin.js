@@ -17,6 +17,13 @@ import {
   calculateCanvasWindow,
   calculateQualityWindowLimit
 } from "./canvas-sizing.mjs";
+import {
+  RESPONSIVE_POINT_BASIS,
+  createResponsivePoint,
+  normalizeContentFrame,
+  normalizeResponsiveAnchor,
+  projectResponsivePoint
+} from "./layout-coordinates.mjs";
 const activeDocument = globalThis[["doc", "ument"].join("")];
 var PLUGIN_ID = "notedraw";
 var DRAWING_DIR = `${PLUGIN_ID}/drawings`;
@@ -934,20 +941,12 @@ var DEFAULT_SETTINGS = {
   autoSaveDelayMs: 500,
   enableDebugLog: false
 };
+var MARKDOWN_TEXT_SELECTOR = "h1,h2,h3,h4,h5,h6,p,li,blockquote,td,th,.callout-content";
 var EDITABLE_SELECTOR = [
-  ".markdown-preview-view h1",
-  ".markdown-preview-view h2",
-  ".markdown-preview-view h3",
-  ".markdown-preview-view h4",
-  ".markdown-preview-view h5",
-  ".markdown-preview-view h6",
-  ".markdown-preview-view p",
-  ".markdown-preview-view li",
-  ".markdown-preview-view blockquote",
-  ".markdown-preview-view td",
-  ".markdown-preview-view th",
-  ".markdown-preview-view .callout-content"
-].join(",");
+  ".markdown-preview-view",
+  ".markdown-embed-content",
+  ".internal-embed"
+].flatMap((root) => MARKDOWN_TEXT_SELECTOR.split(",").map((selector) => `${root} ${selector}`)).join(",");
 var BLOCKED_EDIT_SELECTOR = [
   ".notedraw-button",
   ".notedraw-toolbar",
@@ -965,9 +964,7 @@ var BLOCKED_EDIT_SELECTOR = [
   "img",
   "svg",
   "canvas",
-  ".internal-embed",
   ".external-embed",
-  ".markdown-embed",
   ".frontmatter",
   ".metadata-container"
 ].join(",");
@@ -1025,6 +1022,7 @@ var NoteDrawPlugin = class extends Plugin {
     this.headerActions = /* @__PURE__ */ new Map();
     this.saveTimers = /* @__PURE__ */ new Map();
     this.textSaveStates = /* @__PURE__ */ new WeakMap();
+    this.apiListeners = /* @__PURE__ */ new Map();
     this.settingsSaveTimer = null;
     this.webviewSyncTimer = null;
     this.webviewMutationObserver = null;
@@ -1041,6 +1039,7 @@ var NoteDrawPlugin = class extends Plugin {
     this.addSettingTab(new NoteDrawSettingTab(this.app, this));
     const syncSurfaces = () => {
       this.pruneDisconnectedControllers();
+      this.syncRenderedMarkdownAnnotations();
       this.syncSourceControllers();
       this.syncMarkdownControllerModes();
       this.syncWebviewControllers();
@@ -1051,6 +1050,8 @@ var NoteDrawPlugin = class extends Plugin {
     this.installWebviewObserver();
     window.setTimeout(syncSurfaces, 0);
     this.registerMarkdownPostProcessor((el, ctx) => {
+      const renderedSourcePath = resolveRenderedSourcePath(this.app, el, ctx.sourcePath);
+      annotateEditableElements(el, ctx, renderedSourcePath);
       const preview = el.closest(".markdown-preview-view");
       if (!preview || isEmbeddedPreview(preview)) {
         return;
@@ -1059,7 +1060,6 @@ var NoteDrawPlugin = class extends Plugin {
       if (!view || !view.file || !ctx.sourcePath || view.file.path !== ctx.sourcePath) {
         return;
       }
-      annotateEditableElements(el, ctx);
       const existingController = this.controllers.get(preview) || preview._noteDrawController;
       if (existingController?.plugin === this && !existingController.destroyed) {
         existingController.setFile(view.file).catch((error) => {
@@ -1103,6 +1103,7 @@ var NoteDrawPlugin = class extends Plugin {
     }
     this.webviewMutationObserver?.disconnect();
     this.webviewMutationObserver = null;
+    this.apiListeners?.clear();
     if (typeof window !== "undefined" && window.NoteDraw === this.api) {
       delete window.NoteDraw;
     }
@@ -1185,39 +1186,214 @@ var NoteDrawPlugin = class extends Plugin {
     }, 120);
   }
   createPublicApi() {
-    return {
-      version: "3.1.37",
-      getActiveController: () => this.getActiveController(),
-      readDrawings: async (file) => this.readDrawings(file),
-      writeDrawings: async (file, data) => this.writeDrawings(file, normalizeDrawingData(data, file)),
-      getStoragePaths: (file) => ({
-        current: this.drawingPathForFile(file),
-        legacy: this.legacyDrawingPathForFile(file)
-      }),
-      injectExportSnapshot: async (file, container) => this.injectExportSnapshot(file, container),
-      replaceSelectionText: async (file, originalText, editedText) => {
+    const capabilities = Object.freeze({
+      responsiveCoordinates: RESPONSIVE_POINT_BASIS,
+      embeddedMarkdownEditing: true,
+      readingViewEditing: true,
+      sourceViewEditing: true,
+      events: ["drawings-changed", "markdown-changed", "surface-changed"],
+      tools: [TOOL_DRAW, TOOL_SELECT, TOOL_EDIT_MD, TOOL_TEXT]
+    });
+    const v1 = {
+      apiVersion: "1.0",
+      capabilities,
+      resolveFile: (fileOrPath, sourcePath = "") => this.resolveApiFile(fileOrPath, sourcePath),
+      listSurfaces: () => this.getAllControllers().map((controller) => this.describeController(controller)),
+      getActiveSurface: () => this.describeController(this.getActiveController()),
+      activate: async (options = {}) => this.activateApi(options),
+      setTool: (tool, options = {}) => this.setApiTool(tool, options),
+      readDrawings: async (fileOrPath) => {
+        const file = this.resolveApiFile(fileOrPath);
         if (!file) {
-          return { changed: false, reason: "missing-file" };
+          throw new Error("NoteDraw could not resolve the requested file");
         }
-        const sourceInfo = null;
-        const source = await this.app.vault.read(file);
-        const target = resolveSourceEditTarget(source, sourceInfo, originalText);
-        if (!target) {
-          return { changed: false, reason: "target-not-found" };
-        }
-        return this.saveTextBlock(file, originalText, editedText, sourceInfo, target);
+        return this.readDrawings(file);
       },
-      insertStroke: async (file, stroke) => {
-        const data = await this.readDrawings(file);
-        const normalized = normalizeStroke(stroke);
-        if (!normalized.points.length) {
-          return data;
+      writeDrawings: async (fileOrPath, data) => {
+        const file = this.resolveApiFile(fileOrPath);
+        if (!file) {
+          throw new Error("NoteDraw could not resolve the requested file");
         }
-        data.strokes.push(normalized);
-        await this.writeDrawings(file, data);
-        return data;
-      }
+        const normalized = normalizeDrawingData(data, file);
+        await this.writeDrawings(file, normalized);
+        this.refreshControllersForFile(file, normalized);
+        return normalized;
+      },
+      getStoragePaths: (fileOrPath) => {
+        const file = this.resolveApiFile(fileOrPath);
+        return file ? {
+          current: this.drawingPathForFile(file),
+          legacy: this.legacyDrawingPathForFile(file)
+        } : null;
+      },
+      replaceText: async (options) => this.replaceTextApi(options),
+      insertStroke: async (fileOrPath, stroke) => this.insertStrokeApi(fileOrPath, stroke),
+      refresh: async (fileOrPath) => {
+        const file = this.resolveApiFile(fileOrPath);
+        if (!file) {
+          return { ok: false, reason: "missing-file" };
+        }
+        const data = await this.readDrawings(file);
+        return { ok: true, refreshed: this.refreshControllersForFile(file, data) };
+      },
+      injectExportSnapshot: async (fileOrPath, container) => {
+        const file = this.resolveApiFile(fileOrPath);
+        return file ? this.injectExportSnapshot(file, container) : null;
+      },
+      on: (eventName, listener) => this.onApiEvent(eventName, listener)
     };
+    return {
+      version: "3.1.38",
+      apiVersion: v1.apiVersion,
+      capabilities,
+      v1,
+      getActiveController: () => this.getActiveController(),
+      readDrawings: v1.readDrawings,
+      writeDrawings: v1.writeDrawings,
+      getStoragePaths: v1.getStoragePaths,
+      injectExportSnapshot: v1.injectExportSnapshot,
+      replaceSelectionText: async (file, originalText, editedText) => this.replaceTextApi({ file, originalText, editedText }),
+      insertStroke: v1.insertStroke,
+      on: v1.on
+    };
+  }
+  resolveApiFile(fileOrPath, sourcePath = "") {
+    if (fileOrPath && typeof fileOrPath === "object" && typeof fileOrPath.path === "string") {
+      return this.app.vault.getFileByPath?.(normalizePath(fileOrPath.path)) || fileOrPath;
+    }
+    const path = normalizeVaultPath(fileOrPath);
+    if (!path) {
+      return null;
+    }
+    return this.app.vault.getFileByPath?.(normalizePath(path)) || this.app.metadataCache.getFirstLinkpathDest?.(path, sourcePath || "") || null;
+  }
+  describeController(controller) {
+    if (!controller || controller.destroyed) {
+      return null;
+    }
+    return {
+      file: controller.file?.path || "",
+      surface: controller.surfaceType,
+      active: Boolean(controller.active),
+      tool: controller.toolMode,
+      drawingsLoaded: Boolean(controller.drawingsLoaded),
+      coordinateBasis: RESPONSIVE_POINT_BASIS
+    };
+  }
+  findApiController(options = {}) {
+    const requestedPath = normalizeVaultPath(options.file?.path || options.path || options.file || "");
+    const requestedSurface = String(options.surface || "").trim();
+    const controllers = this.getAllControllers();
+    const matches = controllers.filter((controller) => {
+      if (requestedPath && normalizeVaultPath(controller.file?.path) !== requestedPath) {
+        return false;
+      }
+      if (requestedSurface && controller.surfaceType !== requestedSurface) {
+        return false;
+      }
+      return controller.previewEl?.isConnected;
+    });
+    return matches.find((controller) => isElementVisibleEnough(controller.previewEl)) || matches.find((controller) => controller.active) || matches[0] || this.getActiveController();
+  }
+  async activateApi(options = {}) {
+    const controller = this.findApiController(options);
+    if (!controller) {
+      return { ok: false, reason: "surface-not-found" };
+    }
+    if (!controller.active) {
+      await controller.toggle();
+    }
+    if (options.tool) {
+      controller.setToolFromApi(options.tool, options);
+    }
+    const surface = this.describeController(controller);
+    this.emitApiEvent("surface-changed", surface);
+    return { ok: true, surface };
+  }
+  setApiTool(tool, options = {}) {
+    const controller = this.findApiController(options);
+    if (!controller) {
+      return { ok: false, reason: "surface-not-found" };
+    }
+    const ok = controller.setToolFromApi(tool, options);
+    const surface = this.describeController(controller);
+    if (ok) {
+      this.emitApiEvent("surface-changed", surface);
+    }
+    return { ok, surface };
+  }
+  async replaceTextApi(options = {}) {
+    const file = this.resolveApiFile(options.file || options.path, options.sourcePath || "");
+    if (!file) {
+      return { changed: false, reason: "missing-file" };
+    }
+    const originalText = String(options.originalText || "");
+    const editedText = String(options.editedText ?? options.text ?? "");
+    const sourceInfo = options.sourceInfo || null;
+    const source = await this.app.vault.read(file);
+    const target = resolveSourceEditTarget(source, sourceInfo, originalText);
+    if (!target) {
+      return { changed: false, reason: "target-not-found" };
+    }
+    return this.saveTextBlock(file, originalText, editedText, sourceInfo, target);
+  }
+  async insertStrokeApi(fileOrPath, stroke) {
+    const file = this.resolveApiFile(fileOrPath);
+    if (!file) {
+      throw new Error("NoteDraw could not resolve the requested file");
+    }
+    const data = await this.readDrawings(file);
+    const normalized = normalizeStroke(stroke);
+    if (normalized.points.length) {
+      data.strokes.push(normalized);
+      await this.writeDrawings(file, data);
+      this.refreshControllersForFile(file, data);
+    }
+    return data;
+  }
+  refreshControllersForFile(file, data) {
+    let refreshed = 0;
+    for (const controller of this.getAllControllers()) {
+      if (normalizeVaultPath(controller.file?.path) !== normalizeVaultPath(file?.path) || controller.pointerDown || controller.draggingStroke || controller.resizingSelection) {
+        continue;
+      }
+      controller.drawingData = normalizeDrawingData(data, file);
+      controller.drawingsLoaded = true;
+      controller.responsivePointsInitialized = false;
+      controller.responsiveLayoutSignature = "";
+      controller.responsiveLayoutContext = null;
+      controller.invalidateStaticCache();
+      controller.resizeCanvas();
+      controller.render();
+      refreshed += 1;
+    }
+    return refreshed;
+  }
+  onApiEvent(eventName, listener) {
+    if (typeof listener !== "function") {
+      return () => void 0;
+    }
+    const name = String(eventName || "");
+    let listeners = this.apiListeners.get(name);
+    if (!listeners) {
+      listeners = /* @__PURE__ */ new Set();
+      this.apiListeners.set(name, listeners);
+    }
+    listeners.add(listener);
+    return () => listeners.delete(listener);
+  }
+  emitApiEvent(eventName, detail) {
+    for (const listener of Array.from(this.apiListeners?.get(eventName) || [])) {
+      try {
+        listener(detail);
+      } catch (error) {
+        console.error(`[${PLUGIN_ID}] API listener failed`, error);
+      }
+    }
+  }
+  resolveEditableFile(element, fallbackFile) {
+    const sourcePath = normalizeVaultPath(element?.dataset?.noteDrawSourcePath || "");
+    return this.resolveApiFile(sourcePath) || fallbackFile;
   }
   getActiveController() {
     const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
@@ -1248,6 +1424,16 @@ var NoteDrawPlugin = class extends Plugin {
     controller.toggle().catch((error) => {
       console.error(`[${PLUGIN_ID}] Failed to toggle NoteDraw`, error);
     });
+  }
+  syncRenderedMarkdownAnnotations() {
+    const leaves = this.app.workspace.getLeavesOfType?.("markdown") || [];
+    for (const leaf of leaves) {
+      const view = leaf.view;
+      if (!(view instanceof MarkdownView) || !view.file || !view.containerEl) {
+        continue;
+      }
+      annotateVisibleMarkdownElements(this.app, view.containerEl, view.file.path);
+    }
   }
   syncSourceControllers() {
     const leaves = this.app.workspace.getLeavesOfType?.("markdown") || [];
@@ -1684,6 +1870,12 @@ var NoteDrawPlugin = class extends Plugin {
       updatedAt: (/* @__PURE__ */ new Date()).toISOString()
     }, null, 2);
     await this.app.vault.adapter.write(path, body);
+    this.emitApiEvent("drawings-changed", {
+      file: file.path,
+      storagePath: path,
+      strokeCount: Array.isArray(data?.strokes) ? data.strokes.length : 0,
+      updatedAt: data?.updatedAt || null
+    });
   }
   async injectExportSnapshot(file, container) {
     if (!file || !(container instanceof HTMLElement)) {
@@ -2019,6 +2211,12 @@ var NoteDrawPlugin = class extends Plugin {
     }, sourceInfo, editedText);
     if (currentText !== replacement) {
       await this.app.vault.modify(file, `${source.slice(0, start)}${replacement}${source.slice(end)}`);
+      this.emitApiEvent("markdown-changed", {
+        file: file.path,
+        start,
+        end,
+        replacementLength: replacement.length
+      });
     }
     return { changed: true, target: nextTarget };
   }
@@ -2036,13 +2234,14 @@ var PreviewDrawingController = class {
     this.runtimeSettings = sanitizeSettings(this.plugin?.noteDrawSettings || {});
     this.active = false;
     this.drawingData = {
-      version: 1,
+      version: 2,
       sourcePath: file.path,
       strokes: [],
       updatedAt: null
     };
     this.currentStroke = null;
     this.currentEditor = null;
+    this.currentEditorFile = null;
     this.currentTextRange = null;
     this.formatToolbar = null;
     this.formatToolbarManualPosition = null;
@@ -2127,10 +2326,15 @@ var PreviewDrawingController = class {
     this.canvasWindowTop = 0;
     this.canvasRenderHeight = 1;
     this.canvasBackingScale = 1;
+    this.responsiveLayoutSignature = "";
+    this.responsivePointsInitialized = false;
+    this.responsiveLayoutContext = null;
     this.renderFrameId = null;
     this.pendingDomRender = false;
     this.resizeFrameId = null;
     this.positionFrameId = null;
+    this.markdownAnnotationTimer = null;
+    this.markdownRenderObserver = null;
     this.staticCanvas = activeDocument.createElement("canvas");
     this.staticCanvas.width = 1;
     this.staticCanvas.height = 1;
@@ -2163,6 +2367,7 @@ var PreviewDrawingController = class {
     cleanupDrawingUi(this.previewEl);
     this.previewEl._noteDrawController = this;
     this.previewEl.addClass("notedraw-shell");
+    this.previewEl.addClass("is-notedraw-responsive-layout");
     this.previewEl.toggleClass("is-notedraw-source-shell", this.surfaceType === "source");
     this.previewEl.toggleClass("is-notedraw-webview-shell", this.surfaceType === "webview");
     this.floatingControlsInBody = shouldUseBodyFloatingControls(this.previewEl, this.surfaceType);
@@ -2334,6 +2539,15 @@ var PreviewDrawingController = class {
       }
     }
     this.refreshScrollContainer();
+    annotateVisibleMarkdownElements(this.plugin.app, this.previewEl, this.file.path);
+    if (typeof MutationObserver !== "undefined") {
+      this.markdownRenderObserver = new MutationObserver((mutations) => {
+        if (mutations.some((mutation) => isMarkdownContentMutation(mutation))) {
+          this.scheduleMarkdownAnnotationRefresh();
+        }
+      });
+      this.markdownRenderObserver.observe(this.previewEl, { subtree: true, childList: true });
+    }
     this.updateToolButtons();
     this.syncPaletteInputs();
     this.refreshLocalizedLabels();
@@ -2478,6 +2692,9 @@ var PreviewDrawingController = class {
     this.embedNodes.clear();
     this.embedRenderTokens.clear();
     this.canvasImageCache.clear();
+    this.responsiveLayoutSignature = "";
+    this.responsivePointsInitialized = false;
+    this.responsiveLayoutContext = null;
     this.invalidateStaticCache();
     this.drawingsLoaded = false;
     this.loadingDrawings = null;
@@ -2497,6 +2714,9 @@ var PreviewDrawingController = class {
     this.canvasWindowTop = 0;
     this.canvasRenderHeight = 1;
     this.canvasBackingScale = 1;
+    this.responsiveLayoutSignature = "";
+    this.responsivePointsInitialized = false;
+    this.responsiveLayoutContext = null;
     for (const canvas of [this.staticCanvas, this.canvas]) {
       if (!canvas) {
         continue;
@@ -2521,6 +2741,12 @@ var PreviewDrawingController = class {
     this.cancelResizeFrame();
     this.cancelPositionFrame();
     this.resizeObserver?.disconnect();
+    this.markdownRenderObserver?.disconnect();
+    this.markdownRenderObserver = null;
+    if (this.markdownAnnotationTimer !== null) {
+      window.clearTimeout(this.markdownAnnotationTimer);
+      this.markdownAnnotationTimer = null;
+    }
     this.scrollEventTarget?.removeEventListener("scroll", this.onScroll);
     this.scrollContainer = null;
     this.scrollEventTarget = null;
@@ -2552,6 +2778,7 @@ var PreviewDrawingController = class {
     this.staticCanvas?.remove();
     this.canvas?.remove();
     this.previewEl.removeClass("notedraw-shell");
+    this.previewEl.removeClass("is-notedraw-responsive-layout");
     this.previewEl.removeClass("is-drawing-active");
     this.previewEl.removeClass("is-drawing-hidden");
     this.previewEl.removeClass("is-select-mode");
@@ -2701,6 +2928,23 @@ var PreviewDrawingController = class {
     window.setTimeout(() => this.scheduleResize(), 1600);
     window.setTimeout(() => this.scheduleResize(), 2600);
   }
+  scheduleMarkdownAnnotationRefresh() {
+    if (this.markdownAnnotationTimer !== null || this.destroyed) {
+      return;
+    }
+    this.markdownAnnotationTimer = window.setTimeout(() => {
+      this.markdownAnnotationTimer = null;
+      if (this.destroyed || !this.previewEl?.isConnected) {
+        return;
+      }
+      annotateVisibleMarkdownElements(this.plugin.app, this.previewEl, this.file.path);
+      this.responsiveLayoutContext = null;
+      if (this.drawingsLoaded) {
+        this.responsiveLayoutSignature = "";
+        this.scheduleResize();
+      }
+    }, 120);
+  }
   updateFloatingControlsPosition() {
     if (!this.button || !this.toolbar) {
       return;
@@ -2711,20 +2955,29 @@ var PreviewDrawingController = class {
     const viewHeader = this.view?.containerEl?.querySelector?.(".view-header") || this.button.closest?.(".view-header") || null;
     const chromeRect = viewHeader?.getBoundingClientRect?.() || this.button.closest?.(".view-actions")?.getBoundingClientRect?.() || null;
     const toolbarHeight = Math.max(36, this.toolbar.getBoundingClientRect().height || 36);
-    const buttonVisible = buttonRect.width > 0 && buttonRect.height > 0 && buttonRect.bottom > 0 && buttonRect.top < window.innerHeight;
-    const anchorRight = hostRect.right > 0 ? hostRect.right : buttonVisible ? buttonRect.right : window.innerWidth;
+    const viewport = window.visualViewport;
+    const viewportLeft = viewport?.offsetLeft || 0;
+    const viewportTop = viewport?.offsetTop || 0;
+    const viewportWidth = Math.max(160, viewport?.width || window.innerWidth || 160);
+    const viewportHeight = Math.max(120, viewport?.height || window.innerHeight || 120);
+    const viewportRight = viewportLeft + viewportWidth;
+    const buttonVisible = buttonRect.width > 0 && buttonRect.height > 0 && buttonRect.bottom > viewportTop && buttonRect.top < viewportTop + viewportHeight;
+    const anchorRight = hostRect.right > 0 ? hostRect.right : buttonVisible ? buttonRect.right : viewportRight;
     const headerBottom = chromeRect && chromeRect.bottom > 0 ? chromeRect.bottom : 48;
     const anchorBottom = Math.max(
       buttonVisible ? buttonRect.bottom : 0,
       headerBottom
     );
-    const right = clamp(window.innerWidth - anchorRight + 10, 8, Math.max(8, window.innerWidth - 48));
-    const minTop = Math.max(56, headerBottom + 6);
-    const maxTop = Math.max(minTop, window.innerHeight - toolbarHeight - 8);
+    const compactViewport = isMobileRuntime() || viewportWidth < 640;
+    const right = compactViewport ? 8 : clamp(viewportRight - anchorRight + 10, 8, Math.max(8, viewportWidth - 48));
+    const left = compactViewport ? viewportLeft + 8 : "auto";
+    const minTop = Math.max(viewportTop + 8, headerBottom + 6);
+    const maxTop = Math.max(minTop, viewportTop + viewportHeight - toolbarHeight - 8);
     const topOffset = sanitizeSettings(this.plugin?.noteDrawSettings || {}).toolbarTopOffset;
     const top = clamp(anchorBottom + topOffset, minTop, maxTop);
     const props = {
       "--notedraw-toolbar-right": `${Math.round(right)}px`,
+      "--notedraw-toolbar-left": typeof left === "number" ? `${Math.round(left)}px` : left,
       "--notedraw-toolbar-top": `${Math.round(top)}px`,
       "--notedraw-palette-top": `${Math.round(top + 42)}px`,
       "--notedraw-text-panel-top": `${Math.round(top + 42)}px`
@@ -2777,6 +3030,32 @@ var PreviewDrawingController = class {
     this.cancelSelectionDrag(true);
     this.updateToolButtons();
     this.render();
+  }
+  setToolFromApi(tool, options = {}) {
+    const normalized = String(tool || "").trim().toLowerCase();
+    if (normalized === TOOL_EDIT_MD || normalized === "edit" || normalized === "markdown") {
+      this.setEditMarkdownMode();
+      return true;
+    }
+    if (normalized === TOOL_SELECT || normalized === "selection") {
+      if (this.toolMode !== TOOL_SELECT) {
+        this.toggleSelectMode();
+      }
+      return true;
+    }
+    if (normalized === TOOL_TEXT) {
+      if (this.surfaceType === "source") {
+        return false;
+      }
+      this.textPreset = String(options.preset || "plain");
+      this.setTextMode();
+      return true;
+    }
+    if (normalized === TOOL_DRAW || normalized === BRUSH_PEN || normalized === BRUSH_WATERCOLOR) {
+      this.setBrushMode(normalized === BRUSH_WATERCOLOR || options.brush === BRUSH_WATERCOLOR ? BRUSH_WATERCOLOR : BRUSH_PEN);
+      return true;
+    }
+    return false;
   }
   currentBrushSettings() {
     if (!this.brushSettings[this.brushMode]) {
@@ -3538,6 +3817,112 @@ var PreviewDrawingController = class {
       this.surfaceType === "webview" ? "editWebviewDraw" : this.drawingsVisible ? "editTextDraw" : "editTextDrawHidden"
     );
   }
+  getResponsiveContentFrame() {
+    return measureResponsiveContentFrame(this.previewEl, this.surfaceType, this.canvasWidth(), this.canvas);
+  }
+  getResponsiveLayoutContext(refresh = false) {
+    if (this.responsiveLayoutContext && !refresh) {
+      return this.responsiveLayoutContext;
+    }
+    this.responsiveLayoutContext = {
+      frame: this.getResponsiveContentFrame(),
+      lineAnchors: collectRenderedLineAnchors(this.previewEl, this.canvas, this.canvasWindowTop),
+      codeMirror: this.surfaceType === "source" ? getCodeMirrorView(this.view, this.previewEl) : null
+    };
+    return this.responsiveLayoutContext;
+  }
+  captureLineLocation(canvasX, canvasY, context = this.getResponsiveLayoutContext()) {
+    const rendered = captureRenderedLineLocation(context.lineAnchors, canvasX, canvasY);
+    if (rendered) {
+      return rendered;
+    }
+    if (!context.codeMirror || !this.canvas) {
+      return null;
+    }
+    const canvasRect = this.canvas.getBoundingClientRect();
+    return captureCodeMirrorLineLocation(
+      context.codeMirror,
+      canvasRect.left + canvasX,
+      canvasRect.top + canvasY - this.canvasWindowTop,
+      this.file?.path || ""
+    );
+  }
+  projectLineLocation(path, line, context = this.getResponsiveLayoutContext()) {
+    const renderedY = projectRenderedLineLocation(context.lineAnchors, path, line);
+    if (Number.isFinite(renderedY)) {
+      return renderedY;
+    }
+    if (!context.codeMirror || normalizeVaultPath(path) !== normalizeVaultPath(this.file?.path) || !this.canvas) {
+      return NaN;
+    }
+    const clientY = projectCodeMirrorLineLocation(context.codeMirror, line);
+    if (!Number.isFinite(clientY)) {
+      return NaN;
+    }
+    return clientY - this.canvas.getBoundingClientRect().top + this.canvasWindowTop;
+  }
+  captureResponsivePoint(point, context = this.getResponsiveLayoutContext()) {
+    const canvasX = clamp(Number(point?.x || 0), 0, 1) * this.canvasWidth();
+    const canvasY = clamp(Number(point?.y || 0), 0, 1) * this.canvasHeight();
+    const lineLocation = this.captureLineLocation(canvasX, canvasY, context);
+    return {
+      ...point,
+      ...createResponsivePoint({
+        canvasX,
+        canvasY,
+        canvasWidth: this.canvasWidth(),
+        canvasHeight: this.canvasHeight(),
+        frame: context.frame,
+        sourcePath: lineLocation?.path || this.file?.path || "",
+        linePosition: lineLocation?.line ?? null,
+        time: point?.t
+      })
+    };
+  }
+  captureResponsiveAnchorsForIndexes(indexes) {
+    const context = this.getResponsiveLayoutContext(true);
+    for (const index of indexes) {
+      const stroke = this.drawingData?.strokes?.[index];
+      if (stroke?.points?.length) {
+        stroke.points = stroke.points.map((point) => this.captureResponsivePoint(point, context));
+      }
+    }
+  }
+  initializeAndProjectResponsivePoints(context, signature) {
+    let migrated = false;
+    for (const stroke of this.drawingData?.strokes || []) {
+      stroke.points = stroke.points.map((point) => {
+        if (normalizeResponsiveAnchor(point.anchor)) {
+          return point;
+        }
+        migrated = true;
+        return this.captureResponsivePoint(point, context);
+      });
+    }
+    const lineToCanvasY = (path, line) => this.projectLineLocation(path, line, context);
+    for (const stroke of this.drawingData?.strokes || []) {
+      stroke.points = stroke.points.map((point) => projectResponsivePoint(point, {
+        canvasWidth: this.canvasWidth(),
+        canvasHeight: this.canvasHeight(),
+        frame: context.frame,
+        lineToCanvasY
+      }));
+    }
+    if (this.currentStroke?.points?.length) {
+      this.currentStroke.points = this.currentStroke.points.map((point) => projectResponsivePoint(point, {
+        canvasWidth: this.canvasWidth(),
+        canvasHeight: this.canvasHeight(),
+        frame: context.frame,
+        lineToCanvasY
+      }));
+    }
+    this.responsivePointsInitialized = true;
+    this.responsiveLayoutSignature = signature;
+    if (migrated) {
+      this.drawingData.version = Math.max(2, Number(this.drawingData.version) || 1);
+      this.plugin.scheduleDrawingSave(this.file, this.drawingData);
+    }
+  }
   resizeCanvas() {
     this.refreshScrollContainer();
     this.layoutMeasureEl = findLayoutMeasureElement(this.previewEl);
@@ -3545,7 +3930,7 @@ var PreviewDrawingController = class {
     const width = Math.max(1, Math.round(measured.width));
     const height = Math.max(1, Math.round(measured.height));
     const visible = measureVisibleSurfaceWindow(this.previewEl, this.scrollContainer, height);
-    const isMobile = Boolean(Platform.isMobileApp);
+    const isMobile = isMobileRuntime();
     const devicePixelRatio = window.devicePixelRatio || 1;
     const maxDevicePixelRatio = isMobile ? 4 : 3;
     const maxPixels = isMobile ? 6 * 1024 * 1024 : 16 * 1024 * 1024;
@@ -3608,6 +3993,15 @@ var PreviewDrawingController = class {
       return false;
     }
     this.staticCtx.setTransform(backingStore.scale, 0, 0, backingStore.scale, 0, -canvasWindow.top * backingStore.scale);
+    if (this.drawingsLoaded) {
+      const frame = this.getResponsiveContentFrame();
+      const signature = responsiveLayoutSignature(width, height, frame, this.surfaceType);
+      if (!this.responsivePointsInitialized || signature !== this.responsiveLayoutSignature) {
+        this.responsiveLayoutContext = null;
+        const context = this.getResponsiveLayoutContext(true);
+        this.initializeAndProjectResponsivePoints(context, signature);
+      }
+    }
     if (geometryChanged || backingStoreChanged) {
       this.invalidateStaticCache();
     }
@@ -3635,7 +4029,10 @@ var PreviewDrawingController = class {
     }
     const target = this.elementBelowCanvas(event.clientX, event.clientY);
     const canEditMarkdownText = this.toolMode === TOOL_EDIT_MD;
-    const editable = this.allowTextEdit && canEditMarkdownText ? findEditableTarget(target, this.previewEl) : null;
+    const editableCandidate = canEditMarkdownText ? findEditableTarget(target, this.previewEl) : null;
+    const editableFile = editableCandidate ? this.plugin.resolveEditableFile(editableCandidate, this.file) : null;
+    const editsEmbeddedFile = Boolean(editableFile?.path && editableFile.path !== this.file?.path);
+    const editable = editableCandidate && (this.allowTextEdit || editsEmbeddedFile) ? editableCandidate : null;
     const sourceTextTarget = this.surfaceType === "source" && canEditMarkdownText && isSourceTextTarget(target, this.previewEl);
     const point = this.eventToPoint(event);
     const hitStrokeIndex = this.findStrokeAt(point);
@@ -3910,6 +4307,8 @@ var PreviewDrawingController = class {
     } else if (this.currentStroke.kind === TOOL_TEXT) {
       this.currentStroke = null;
     } else {
+      const responsiveContext = this.getResponsiveLayoutContext();
+      this.currentStroke.points = this.currentStroke.points.map((point) => this.captureResponsivePoint(point, responsiveContext));
       this.drawingData.strokes.push(this.currentStroke);
       this.clearSelectedStrokes();
       this.redoStack = [];
@@ -4438,6 +4837,7 @@ var PreviewDrawingController = class {
   finishSelectedStrokeDrag(event) {
     this.clearSelectionLongPress();
     if (this.dragStrokeMoved) {
+      this.captureResponsiveAnchorsForIndexes(Array.from(this.dragStrokeOriginalPoints?.keys() || []));
       this.lastTextTap = null;
       this.redoStack = [];
       this.plugin.scheduleDrawingSave(this.file, this.drawingData);
@@ -4559,6 +4959,7 @@ var PreviewDrawingController = class {
         previewWidth: clamp((original.previewWidth || 260) * Math.abs(scaleX), 80, 900),
         previewHeight: clamp((original.previewHeight || 160) * Math.abs(scaleY), 40, 700),
         points: original.points.map((strokePoint) => ({
+          ...strokePoint,
           x: anchor.x + (strokePoint.x - anchor.x) * scaleX,
           y: anchor.y + (strokePoint.y - anchor.y) * scaleY
         }))
@@ -4579,6 +4980,7 @@ var PreviewDrawingController = class {
         stroke.previewHeight = next.previewHeight;
       }
       stroke.points = next.points.map((strokePoint) => ({
+        ...strokePoint,
         x: clamp(strokePoint.x, 0, 1),
         y: clamp(strokePoint.y, 0, 1)
       }));
@@ -4586,6 +4988,7 @@ var PreviewDrawingController = class {
   }
   finishSelectedStrokeResize(event) {
     if (this.resizeSelectionMoved) {
+      this.captureResponsiveAnchorsForIndexes(Array.from(this.resizeSelectionOriginalStrokes?.keys() || []));
       this.redoStack = [];
       this.plugin.scheduleDrawingSave(this.file, this.drawingData);
     } else {
@@ -4679,11 +5082,17 @@ var PreviewDrawingController = class {
     const y = event.clientY - rect.top + this.canvasWindowTop;
     const width = this.canvasWidth();
     const height = this.canvasHeight();
-    return {
-      x: clamp(x / width, 0, 1),
-      y: clamp(y / height, 0, 1),
-      t: Date.now()
-    };
+    const context = this.getResponsiveLayoutContext();
+    const lineLocation = this.captureLineLocation(x, y, context);
+    return createResponsivePoint({
+      canvasX: x,
+      canvasY: y,
+      canvasWidth: width,
+      canvasHeight: height,
+      frame: context.frame,
+      sourcePath: lineLocation?.path || this.file?.path || "",
+      linePosition: lineLocation?.line ?? null
+    });
   }
   pointToCanvas(point) {
     return {
@@ -5390,11 +5799,12 @@ var PreviewDrawingController = class {
     }
     this.endTextEdit();
     this.currentEditor = element;
+    this.currentEditorFile = this.plugin.resolveEditableFile(element, this.file);
     this.formatToolbarManualPosition = null;
     element.dataset.noteDrawOriginal = element.innerText;
     const saveToVault = this.surfaceType !== "webview";
     if (saveToVault) {
-      this.plugin.prepareTextEditState(this.file, element.innerText, element);
+      this.plugin.prepareTextEditState(this.currentEditorFile, element.innerText, element);
     }
     element.contentEditable = "true";
     element.spellcheck = true;
@@ -5410,7 +5820,7 @@ var PreviewDrawingController = class {
         return;
       }
       this.plugin.scheduleTextSave(
-        this.file,
+        this.currentEditorFile,
         element.dataset.noteDrawOriginal || "",
         serializeEditableSource(element),
         element
@@ -5489,7 +5899,7 @@ var PreviewDrawingController = class {
     if (this.surfaceType === "webview") {
       this.commitWebviewTextEdit(element, original, edited);
     } else if (normalizeEditableSourceText(original) !== normalizeEditableSourceText(edited)) {
-      this.plugin.scheduleTextSaveNow(this.file, original, edited, element);
+      this.plugin.scheduleTextSaveNow(this.currentEditorFile || this.file, original, edited, element);
     }
     element._noteDrawCleanup?.();
     delete element._noteDrawCleanup;
@@ -5502,6 +5912,7 @@ var PreviewDrawingController = class {
     this.currentTextRange = null;
     this.formatToolbarManualPosition = null;
     this.currentEditor = null;
+    this.currentEditorFile = null;
   }
   commitWebviewTextEdit(element, originalText, editedText) {
     const normalizedOriginal = normalizeRenderedText(originalText);
@@ -6069,7 +6480,10 @@ function shouldUseBodyFloatingControls(previewEl, surfaceType) {
   if (surfaceType !== "preview") {
     return false;
   }
-  return isAppleMobileRuntime() && Boolean(previewEl.closest?.(".markdown-preview-view"));
+  return isMobileRuntime() && Boolean(previewEl.closest?.(".markdown-preview-view"));
+}
+function isMobileRuntime() {
+  return Boolean(Platform.isMobileApp || activeDocument?.body?.classList?.contains("is-mobile"));
 }
 function isAppleMobileRuntime() {
   return Boolean(Platform.isIosApp);
@@ -6434,13 +6848,42 @@ function collectMarkdownBlocks(source) {
   }
   return blocks;
 }
-function annotateEditableElements(root, ctx) {
+function resolveRenderedSourcePath(app, root, fallbackPath) {
+  const embed = root?.closest?.(".internal-embed, .markdown-embed, .markdown-embed-content");
+  if (!embed) {
+    return normalizeVaultPath(fallbackPath);
+  }
+  const owner = embed.matches?.(".internal-embed") ? embed : embed.closest?.(".internal-embed") || embed.querySelector?.(".internal-embed") || embed;
+  const rawLink = owner?.getAttribute?.("data-src") || owner?.getAttribute?.("data-path") || owner?.getAttribute?.("src") || "";
+  const link = unwrapWikiLink(String(rawLink || "").replace(/^!/, "")).split("|")[0].split("#")[0].trim();
+  if (!link) {
+    return normalizeVaultPath(fallbackPath);
+  }
+  const file = app.metadataCache.getFirstLinkpathDest?.(link, fallbackPath || "") || app.vault.getFileByPath?.(normalizePath(link));
+  return normalizeVaultPath(file?.path || fallbackPath);
+}
+function annotateVisibleMarkdownElements(app, root, fallbackPath) {
+  for (const element of root?.querySelectorAll?.(EDITABLE_SELECTOR) || []) {
+    element.dataset.noteDrawSourcePath = resolveRenderedSourcePath(app, element, fallbackPath);
+    if (element.dataset.noteDrawLineStart) {
+      continue;
+    }
+    const dataLine = parseDataLine(element.getAttribute("data-line")) ?? parseDataLine(element.closest?.("[data-line]")?.getAttribute("data-line"));
+    if (Number.isFinite(dataLine)) {
+      element.dataset.noteDrawLineStart = String(dataLine);
+      element.dataset.noteDrawLineEnd = String(dataLine);
+      element.dataset.noteDrawDataLine = String(dataLine);
+    }
+  }
+}
+function annotateEditableElements(root, ctx, sourcePath = ctx?.sourcePath || "") {
   const elements = [];
   if (root.matches?.(EDITABLE_SELECTOR)) {
     elements.push(root);
   }
   elements.push(...root.querySelectorAll(EDITABLE_SELECTOR));
   for (const element of elements) {
+    element.dataset.noteDrawSourcePath = normalizeVaultPath(sourcePath);
     const info = safeGetSectionInfo(ctx, element) || safeGetSectionInfo(ctx, root);
     const ownDataLine = parseDataLine(element.getAttribute("data-line"));
     const dataLineEl = element.closest("[data-line]");
@@ -6839,7 +7282,20 @@ function cleanupAllDrawingHeaderButtons() {
 }
 function cleanupDrawingUi(preview) {
   preview.querySelectorAll(".notedraw-button, .notedraw-fallback-button, .notedraw-webview-button, .notedraw-toolbar, .notedraw-palette-panel, .notedraw-text-panel, .notedraw-selection-menu, .notedraw-format-toolbar, .notedraw-embed-layer, .notedraw-file-input, .notedraw-static-canvas, .notedraw-canvas").forEach((element) => element.remove());
-  preview.classList.remove("notedraw-shell", "is-drawing-active", "is-drawing-hidden", "is-select-mode", "is-palette-open", "is-text-panel-open", "is-selection-menu-open", "is-watercolor-mode", "is-edit-md-mode", "is-selecting-strokes", "is-resizing-selection", "is-native-text-editing", "is-notedraw-webview-shell", "has-notedraw-body-controls", "has-notedraw-canvas");
+  preview.classList.remove("notedraw-shell", "is-drawing-active", "is-drawing-hidden", "is-select-mode", "is-palette-open", "is-text-panel-open", "is-selection-menu-open", "is-watercolor-mode", "is-edit-md-mode", "is-selecting-strokes", "is-resizing-selection", "is-native-text-editing", "is-notedraw-webview-shell", "is-notedraw-responsive-layout", "has-notedraw-body-controls", "has-notedraw-canvas");
+}
+function isMarkdownContentMutation(mutation) {
+  if (mutation?.type !== "childList") {
+    return false;
+  }
+  const markdownRootSelector = ".markdown-preview-view, .markdown-embed-content, .internal-embed";
+  return Array.from(mutation.addedNodes || []).some((node) => {
+    if (!node || node.nodeType !== Node.ELEMENT_NODE) {
+      return false;
+    }
+    const insideMarkdown = Boolean(node.closest?.(markdownRootSelector));
+    return node.matches?.(markdownRootSelector) || node.querySelector?.(markdownRootSelector) || insideMarkdown && (node.matches?.(MARKDOWN_TEXT_SELECTOR) || node.querySelector?.(MARKDOWN_TEXT_SELECTOR));
+  });
 }
 function isWebviewSyncMutation(mutation) {
   if (!mutation) {
@@ -7007,7 +7463,7 @@ function sanitizeHTMLToDomSafe(content) {
 }
 function createEmptyDrawingData(file) {
   return {
-    version: 1,
+    version: 2,
     sourcePath: file.path,
     strokes: [],
     webEdits: [],
@@ -7017,7 +7473,7 @@ function createEmptyDrawingData(file) {
 function normalizeDrawingData(data, file) {
   const strokes = Array.isArray(data?.strokes) ? data.strokes : [];
   return {
-    version: Number.isFinite(data?.version) ? data.version : 1,
+    version: Math.max(1, Number.isFinite(data?.version) ? data.version : 1),
     sourcePath: file.path,
     strokes: strokes.map(normalizeStroke).map((stroke) => ({
       ...stroke,
@@ -7071,7 +7527,8 @@ function normalizeStroke(stroke) {
     points: points.map((point) => ({
       x: clamp(Number(point?.x), 0, 1),
       y: clamp(Number(point?.y), 0, 1),
-      t: Number.isFinite(Number(point?.t)) ? Number(point.t) : Date.now()
+      t: Number.isFinite(Number(point?.t)) ? Number(point.t) : Date.now(),
+      anchor: normalizeResponsiveAnchor(point?.anchor)
     })).filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y))
   };
 }
@@ -7591,6 +8048,141 @@ function parseInteger(value) {
 function pointerDistance(a, b) {
   return Math.hypot((a.x || 0) - (b.x || 0), (a.y || 0) - (b.y || 0));
 }
+function findResponsiveContentElement(previewEl, surfaceType) {
+  if (!previewEl) {
+    return null;
+  }
+  if (surfaceType === "source") {
+    return previewEl.querySelector?.(".cm-content") || previewEl.querySelector?.(".cm-sizer") || previewEl;
+  }
+  return previewEl.querySelector?.(":scope > .markdown-preview-sizer") || previewEl.querySelector?.(".markdown-preview-sizer") || previewEl;
+}
+function measureResponsiveContentFrame(previewEl, surfaceType, surfaceWidth, canvas) {
+  const content = findResponsiveContentElement(previewEl, surfaceType);
+  const contentRect = content?.getBoundingClientRect?.();
+  const surfaceRect = canvas?.getBoundingClientRect?.() || previewEl?.getBoundingClientRect?.();
+  if (!contentRect || !surfaceRect || contentRect.width <= 1) {
+    return normalizeContentFrame({ surfaceWidth, contentLeft: 0, contentWidth: surfaceWidth });
+  }
+  return normalizeContentFrame({
+    surfaceWidth,
+    contentLeft: contentRect.left - surfaceRect.left,
+    contentWidth: contentRect.width
+  });
+}
+function responsiveLayoutSignature(width, height, frame, surfaceType) {
+  return [
+    surfaceType,
+    Math.round(Number(width) || 0),
+    Math.round(Number(height) || 0),
+    Math.round(Number(frame?.left) || 0),
+    Math.round(Number(frame?.width) || 0)
+  ].join(":");
+}
+function collectRenderedLineAnchors(root, canvas, canvasWindowTop) {
+  if (!root || !canvas) {
+    return [];
+  }
+  const canvasRect = canvas.getBoundingClientRect();
+  const anchors = [];
+  for (const element of root.querySelectorAll?.("[data-note-draw-line-start]") || []) {
+    const start = parseInteger(element.dataset.noteDrawLineStart);
+    const end = parseInteger(element.dataset.noteDrawLineEnd) ?? start;
+    const path = normalizeVaultPath(element.dataset.noteDrawSourcePath || "");
+    const rect = element.getBoundingClientRect?.();
+    if (!Number.isFinite(start) || !Number.isFinite(end) || !path || !rect || rect.width <= 1 || rect.height <= 1) {
+      continue;
+    }
+    anchors.push({
+      path,
+      start: Math.min(start, end),
+      end: Math.max(start, end),
+      left: rect.left - canvasRect.left,
+      right: rect.right - canvasRect.left,
+      top: rect.top - canvasRect.top + canvasWindowTop,
+      bottom: rect.bottom - canvasRect.top + canvasWindowTop,
+      height: rect.height,
+      area: rect.width * rect.height
+    });
+  }
+  return anchors;
+}
+function captureRenderedLineLocation(anchors, canvasX, canvasY) {
+  const horizontal = anchors.filter((anchor) => canvasX >= anchor.left - 28 && canvasX <= anchor.right + 28);
+  const containing = horizontal.filter((anchor) => canvasY >= anchor.top && canvasY <= anchor.bottom);
+  const candidates = containing.length ? containing : horizontal.map((anchor) => ({
+    ...anchor,
+    distance: canvasY < anchor.top ? anchor.top - canvasY : canvasY > anchor.bottom ? canvasY - anchor.bottom : 0
+  })).filter((anchor) => anchor.distance <= 160);
+  const anchor = candidates.sort((a, b) => (a.distance || 0) - (b.distance || 0) || a.area - b.area)[0];
+  if (!anchor) {
+    return null;
+  }
+  const ratio = clamp((canvasY - anchor.top) / Math.max(1, anchor.height), 0, 0.999999);
+  return {
+    path: anchor.path,
+    line: anchor.start + ratio * Math.max(1, anchor.end - anchor.start + 1)
+  };
+}
+function projectRenderedLineLocation(anchors, path, line) {
+  const normalizedPath = normalizeVaultPath(path);
+  const lineNumber = Number(line);
+  if (!normalizedPath || !Number.isFinite(lineNumber)) {
+    return NaN;
+  }
+  const integerLine = Math.floor(lineNumber);
+  const candidates = anchors.filter((anchor) => anchor.path === normalizedPath && integerLine >= anchor.start && integerLine <= anchor.end);
+  const anchor = candidates.sort((a, b) => (a.end - a.start) - (b.end - b.start) || a.area - b.area)[0];
+  if (!anchor) {
+    return NaN;
+  }
+  const ratio = clamp((lineNumber - anchor.start) / Math.max(1, anchor.end - anchor.start + 1), 0, 1);
+  return anchor.top + ratio * anchor.height;
+}
+function captureCodeMirrorLineLocation(codeMirror, clientX, clientY, sourcePath) {
+  try {
+    const position = codeMirror.posAtCoords?.({ x: clientX, y: clientY }, false) ?? codeMirror.posAtCoords?.({ x: clientX, y: clientY });
+    const doc = codeMirror.state?.doc;
+    if (!Number.isFinite(position) || !doc?.lineAt) {
+      return null;
+    }
+    const line = doc.lineAt(position);
+    const startRect = codeMirror.coordsAtPos?.(line.from);
+    const endRect = codeMirror.coordsAtPos?.(line.to);
+    const top = Math.min(startRect?.top ?? clientY, endRect?.top ?? startRect?.top ?? clientY);
+    const bottom = Math.max(startRect?.bottom ?? clientY + 1, endRect?.bottom ?? startRect?.bottom ?? clientY + 1);
+    const ratio = clamp((clientY - top) / Math.max(1, bottom - top), 0, 0.999999);
+    return {
+      path: normalizeVaultPath(sourcePath),
+      line: Math.max(0, line.number - 1) + ratio
+    };
+  } catch (error) {
+    void error;
+    return null;
+  }
+}
+function projectCodeMirrorLineLocation(codeMirror, linePosition) {
+  try {
+    const doc = codeMirror.state?.doc;
+    const lineNumber = Number(linePosition);
+    if (!doc?.line || !Number.isFinite(lineNumber)) {
+      return NaN;
+    }
+    const wantedLine = clamp(Math.floor(lineNumber) + 1, 1, doc.lines || 1);
+    const line = doc.line(wantedLine);
+    const startRect = codeMirror.coordsAtPos?.(line.from);
+    const endRect = codeMirror.coordsAtPos?.(line.to);
+    if (!startRect && !endRect) {
+      return NaN;
+    }
+    const top = Math.min(startRect?.top ?? endRect.top, endRect?.top ?? startRect.top);
+    const bottom = Math.max(startRect?.bottom ?? endRect.bottom, endRect?.bottom ?? startRect.bottom);
+    return top + clamp(lineNumber - Math.floor(lineNumber), 0, 1) * Math.max(1, bottom - top);
+  } catch (error) {
+    void error;
+    return NaN;
+  }
+}
 function findLayoutMeasureElement(previewEl) {
   return previewEl?.querySelector?.(".markdown-preview-sizer") || previewEl?.querySelector?.(".cm-sizer") || previewEl?.querySelector?.(".cm-content") || previewEl;
 }
@@ -7933,6 +8525,7 @@ function shiftNormalizedStrokesInsideCanvas(strokesByIndex) {
   }
   for (const stroke of strokesByIndex.values()) {
     stroke.points = stroke.points.map((point) => ({
+      ...point,
       x: point.x + dx,
       y: point.y + dy
     }));

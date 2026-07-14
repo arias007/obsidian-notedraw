@@ -256,7 +256,7 @@
   position: fixed;
   z-index: 1001;
   top: var(--notedraw-toolbar-top, 48px);
-  left: auto;
+  left: var(--notedraw-toolbar-left, auto);
   right: var(--notedraw-toolbar-right, 8px);
   display: none;
   gap: 3px;
@@ -267,6 +267,15 @@
   background: color-mix(in srgb, var(--background-primary) 88%, var(--background-secondary));
   box-shadow: 0 1px 5px rgba(0, 0, 0, 0.10);
   max-width: calc(100vw - 16px);
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+  touch-action: pan-x;
+}
+
+.notedraw-toolbar::-webkit-scrollbar {
+  display: none;
 }
 
 .notedraw-shell.is-drawing-active .notedraw-toolbar {
@@ -275,6 +284,24 @@
 
 .notedraw-body-control.notedraw-toolbar.is-drawing-active {
   display: inline-flex;
+}
+
+.notedraw-body-control {
+  transform: translateZ(0);
+}
+
+.notedraw-body-control.notedraw-toolbar {
+  z-index: 10000;
+}
+
+.notedraw-body-control.notedraw-palette-panel,
+.notedraw-body-control.notedraw-text-panel {
+  z-index: 10001;
+}
+
+.notedraw-body-control.notedraw-format-toolbar,
+.notedraw-body-control.notedraw-selection-menu {
+  z-index: 10002;
 }
 
 .notedraw-toolbar button {
@@ -762,5 +789,41 @@
   color: var(--text-muted);
   font-size: var(--font-ui-smaller);
   text-align: center;
+}
+
+@media (max-width: 640px) {
+  .notedraw-toolbar {
+    width: auto;
+    max-width: calc(100vw - 16px);
+    justify-content: flex-start;
+  }
+
+  .notedraw-toolbar button {
+    width: 32px;
+    height: 32px;
+    min-width: 32px;
+  }
+
+  .notedraw-toolbar button svg,
+  .notedraw-toolbar button .svg-icon {
+    width: 19px;
+    height: 19px;
+    min-width: 19px;
+    min-height: 19px;
+  }
+
+  .notedraw-palette-panel,
+  .notedraw-text-panel {
+    left: 8px;
+    right: 8px;
+    width: auto;
+    min-width: 0;
+    max-height: min(62vh, 420px);
+    overflow: auto;
+  }
+
+  .notedraw-format-toolbar {
+    max-width: calc(100vw - 16px);
+  }
 }
 

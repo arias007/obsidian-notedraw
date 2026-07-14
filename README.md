@@ -24,10 +24,12 @@ It is built as a surface layer: the same drawing and text-edit logic works on Ob
 - Lazy drawing-data loading to reduce note-open lag.
 - Viewport-windowed canvas rendering with mobile pixel budgets for stable long-note performance.
 - Inactive canvases stay out of the compositor, and stale view controllers are released on mode or file changes.
+- Responsive coordinates follow the Markdown content lane and nearby source lines across reading, source, desktop, and mobile layouts.
 - Click-to-caret behavior inside active text blocks.
 - Drawing data stored outside Markdown so notes stay clean.
 - Public API for scripts, other plugins, and AI agents.
 - Drawings made inside embedded note previews are stored against the embedded note path, so opening that note shows the same layer.
+- Embedded `![[Markdown notes]]` can be edited in place: direct editing in source view and the floating format toolbar in reading view.
 - Webview surfaces get independent drawing files, so annotations do not bleed between pages.
 - Imported images, videos, files, Markdown, and HTML can be placed as floating NoteDraw elements.
 
@@ -126,23 +128,34 @@ For convenience, it is also exposed while the plugin is loaded:
 const api = window.NoteDraw;
 ```
 
-Current API:
+Stable integration API (recommended for Cancip, scripts, and AI plugins):
 
 ```js
-api.version;
-api.getActiveController();
-await api.readDrawings(file);
-await api.writeDrawings(file, drawingData);
-api.getStoragePaths(file);
-await api.replaceSelectionText(file, originalText, editedText);
-await api.insertStroke(file, stroke);
+const noteDraw = api.v1;
+
+noteDraw.apiVersion;       // "1.0"
+noteDraw.capabilities;
+noteDraw.listSurfaces();
+await noteDraw.activate({ tool: "edit-md" });
+noteDraw.setTool("pen");
+await noteDraw.readDrawings("Notes/example.md");
+await noteDraw.writeDrawings("Notes/example.md", drawingData);
+await noteDraw.replaceText({
+  path: "Notes/example.md",
+  originalText: "old rendered text",
+  editedText: "edited **Markdown** text"
+});
+await noteDraw.insertStroke("Notes/example.md", stroke);
+const unsubscribe = noteDraw.on("markdown-changed", (event) => console.log(event));
 ```
+
+The original top-level methods remain available for compatibility.
 
 Example: read current note drawings.
 
 ```js
 const file = app.workspace.getActiveFile();
-const drawings = await app.plugins.plugins.notedraw.api.readDrawings(file);
+const drawings = await app.plugins.plugins.notedraw.api.v1.readDrawings(file);
 console.log(drawings.strokes.length);
 ```
 
@@ -150,7 +163,7 @@ Example: insert a stroke.
 
 ```js
 const file = app.workspace.getActiveFile();
-await app.plugins.plugins.notedraw.api.insertStroke(file, {
+await app.plugins.plugins.notedraw.api.v1.insertStroke(file, {
   brush: "pen",
   color: "#e53935",
   width: 3,
@@ -167,11 +180,11 @@ Example: AI-assisted text replacement.
 
 ```js
 const file = app.workspace.getActiveFile();
-await app.plugins.plugins.notedraw.api.replaceSelectionText(
+await app.plugins.plugins.notedraw.api.v1.replaceText({
   file,
-  "old rendered text",
-  "edited Markdown text"
-);
+  originalText: "old rendered text",
+  editedText: "edited Markdown text"
+});
 ```
 
 ## AI Editing
@@ -198,4 +211,4 @@ The current package focuses on the local Obsidian plugin runtime. The API and DO
 
 ## Version
 
-Current version: `3.1.37`.
+Current version: `3.1.38`.
