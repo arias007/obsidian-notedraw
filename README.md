@@ -22,6 +22,8 @@ It is built as a surface layer: the same drawing and text-edit logic works on Ob
 - The palette has common color swatches plus an advanced color picker entry.
 - Toolbar positioning stays below the Obsidian view header while scrolling.
 - Lazy drawing-data loading to reduce note-open lag.
+- Viewport-windowed canvas rendering with mobile pixel budgets for stable long-note performance.
+- Inactive canvases stay out of the compositor, and stale view controllers are released on mode or file changes.
 - Click-to-caret behavior inside active text blocks.
 - Drawing data stored outside Markdown so notes stay clean.
 - Public API for scripts, other plugins, and AI agents.
@@ -196,4 +198,4 @@ The current package focuses on the local Obsidian plugin runtime. The API and DO
 
 ## Version
 
-Current version: `0.2.38`.
+Current version: `3.1.37`.

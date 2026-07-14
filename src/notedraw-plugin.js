@@ -12,6 +12,11 @@ import {
 } from "obsidian";
 import SUPPORT_CODE_ALIPAY_DATA_URL from "../extras/code-1.jpg";
 import SUPPORT_CODE_BINANCE_DATA_URL from "../extras/code-2.png";
+import {
+  calculateCanvasBackingStore,
+  calculateCanvasWindow,
+  calculateQualityWindowLimit
+} from "./canvas-sizing.mjs";
 const activeDocument = globalThis[["doc", "ument"].join("")];
 var PLUGIN_ID = "notedraw";
 var DRAWING_DIR = `${PLUGIN_ID}/drawings`;
@@ -948,6 +953,7 @@ var BLOCKED_EDIT_SELECTOR = [
   ".notedraw-toolbar",
   ".notedraw-palette-panel",
   ".notedraw-selection-menu",
+  ".notedraw-static-canvas",
   ".notedraw-canvas",
   "a",
   "button",
@@ -992,6 +998,7 @@ var WEBVIEW_BLOCKED_EDIT_SELECTOR = [
   ".notedraw-text-panel",
   ".notedraw-selection-menu",
   ".notedraw-embed-layer",
+  ".notedraw-static-canvas",
   ".notedraw-canvas",
   "button",
   "input",
@@ -1012,6 +1019,7 @@ var NoteDrawPlugin = class extends Plugin {
     const savedSettings = await this.loadData();
     this.noteDrawSettings = sanitizeSettings({ ...DEFAULT_SETTINGS, ...(savedSettings || {}) });
     this.controllers = /* @__PURE__ */ new WeakMap();
+    this.liveControllers = /* @__PURE__ */ new Set();
     this.sourceControllers = /* @__PURE__ */ new Map();
     this.webviewControllers = /* @__PURE__ */ new Map();
     this.headerActions = /* @__PURE__ */ new Map();
@@ -1032,6 +1040,7 @@ var NoteDrawPlugin = class extends Plugin {
     });
     this.addSettingTab(new NoteDrawSettingTab(this.app, this));
     const syncSurfaces = () => {
+      this.pruneDisconnectedControllers();
       this.syncSourceControllers();
       this.syncMarkdownControllerModes();
       this.syncWebviewControllers();
@@ -1052,7 +1061,7 @@ var NoteDrawPlugin = class extends Plugin {
       }
       annotateEditableElements(el, ctx);
       const existingController = this.controllers.get(preview) || preview._noteDrawController;
-      if (existingController?.plugin === this) {
+      if (existingController?.plugin === this && !existingController.destroyed) {
         existingController.setFile(view.file).catch((error) => {
           console.error(`[${PLUGIN_ID}] Failed to switch preview controller file`, error);
         });
@@ -1065,18 +1074,15 @@ var NoteDrawPlugin = class extends Plugin {
       const controller = new PreviewDrawingController(this, preview, view, view.file);
       this.controllers.set(preview, controller);
       controller.mount();
-      this.register(() => controller.destroy());
       window.setTimeout(() => this.syncWebviewControllers(), 0);
     });
   }
   onunload() {
-    for (const controller of this.sourceControllers.values()) {
+    for (const controller of Array.from(this.liveControllers)) {
       controller.destroy();
     }
+    this.liveControllers.clear();
     this.sourceControllers.clear();
-    for (const controller of this.webviewControllers.values()) {
-      controller.destroy();
-    }
     this.webviewControllers.clear();
     for (const state of this.headerActions.values()) {
       state.button?.remove();
@@ -1137,13 +1143,7 @@ var NoteDrawPlugin = class extends Plugin {
     }
   }
   getAllControllers() {
-    const controllers = [];
-    for (const controller of this.sourceControllers.values()) {
-      controllers.push(controller);
-    }
-    for (const controller of this.webviewControllers.values()) {
-      controllers.push(controller);
-    }
+    const controllers = Array.from(this.liveControllers).filter((controller) => !controller.destroyed);
     activeDocument.querySelectorAll(".notedraw-shell").forEach((element) => {
       const controller = element._noteDrawController;
       if (controller?.plugin === this && !controllers.includes(controller)) {
@@ -1151,6 +1151,13 @@ var NoteDrawPlugin = class extends Plugin {
       }
     });
     return controllers;
+  }
+  pruneDisconnectedControllers() {
+    for (const controller of Array.from(this.liveControllers)) {
+      if (controller.destroyed || !controller.previewEl?.isConnected) {
+        controller.destroy();
+      }
+    }
   }
   installWebviewObserver() {
     if (typeof MutationObserver === "undefined" || !activeDocument?.body) {
@@ -1179,7 +1186,7 @@ var NoteDrawPlugin = class extends Plugin {
   }
   createPublicApi() {
     return {
-      version: "3.1.34",
+      version: "3.1.37",
       getActiveController: () => this.getActiveController(),
       readDrawings: async (file) => this.readDrawings(file),
       writeDrawings: async (file, data) => this.writeDrawings(file, normalizeDrawingData(data, file)),
@@ -1284,7 +1291,6 @@ var NoteDrawPlugin = class extends Plugin {
       controller.mount().catch((error) => {
         console.error(`[${PLUGIN_ID}] Failed to mount source drawing controller`, error);
       });
-      this.register(() => controller.destroy());
     }
     for (const [view, controller] of Array.from(this.sourceControllers.entries())) {
       if (!activeViews.has(view) && !controller.previewEl?.isConnected) {
@@ -1302,19 +1308,21 @@ var NoteDrawPlugin = class extends Plugin {
       }
       const preview = findRootPreviewForView(view);
       const source = findSourceSurfaceForView(view);
-      const previewController = preview ? this.controllers.get(preview) || preview._noteDrawController : null;
+      let previewController = preview ? this.controllers.get(preview) || preview._noteDrawController : null;
       const sourceController = source ? this.controllers.get(source) || source._noteDrawController : null;
-      const sourceVisible = isElementVisibleEnough(source);
       const previewVisible = isElementVisibleEnough(preview);
-      if (sourceVisible && previewController?.active) {
-        previewController.toggle().catch((error) => {
-          console.error(`[${PLUGIN_ID}] Failed to close preview NoteDraw controller`, error);
-        });
+      if (isSourceMode(view)) {
+        previewController?.destroy();
+        continue;
       }
       if (previewVisible && sourceController?.active) {
         sourceController.toggle().catch((error) => {
           console.error(`[${PLUGIN_ID}] Failed to close source NoteDraw controller`, error);
         });
+      }
+      if (previewVisible && (!previewController || previewController.destroyed || previewController.file?.path !== view.file?.path)) {
+        previewController?.destroy();
+        previewController = this.resolveLivePreviewController(view);
       }
     }
   }
@@ -1359,7 +1367,6 @@ var NoteDrawPlugin = class extends Plugin {
       controller.mount().catch((error) => {
         console.error(`[${PLUGIN_ID}] Failed to mount webview drawing controller`, error);
       });
-      this.register(() => controller.destroy());
     }
     for (const [surface, controller] of Array.from(this.webviewControllers.entries())) {
       if (!activeSurfaces.has(surface) || !surface.isConnected) {
@@ -1509,7 +1516,7 @@ var NoteDrawPlugin = class extends Plugin {
       return null;
     }
     const existing = this.controllers.get(preview) || preview._noteDrawController;
-    if (existing?.plugin === this && existing.previewEl?.isConnected && existing.surfaceType === "preview") {
+    if (existing?.plugin === this && !existing.destroyed && existing.previewEl?.isConnected && existing.surfaceType === "preview") {
       return existing;
     }
     const registered = controllers.find((controller) => controller.surfaceType === "preview" && controller.previewEl === preview);
@@ -1522,7 +1529,6 @@ var NoteDrawPlugin = class extends Plugin {
     controller.mount().catch((error) => {
       console.error(`[${PLUGIN_ID}] Failed to mount preview drawing controller`, error);
     });
-    this.register(() => controller.destroy());
     return controller;
   }
   cleanupHeaderButtons(view, keepButton = null) {
@@ -2025,6 +2031,8 @@ var PreviewDrawingController = class {
     this.file = file;
     this.allowTextEdit = options.allowTextEdit !== false;
     this.surfaceType = options.surfaceType || "preview";
+    this.destroyed = false;
+    this.plugin.liveControllers?.add(this);
     this.runtimeSettings = sanitizeSettings(this.plugin?.noteDrawSettings || {});
     this.active = false;
     this.drawingData = {
@@ -2116,12 +2124,19 @@ var PreviewDrawingController = class {
     this.hiddenFileInput = null;
     this.canvasCssWidth = 1;
     this.canvasCssHeight = 1;
+    this.canvasWindowTop = 0;
+    this.canvasRenderHeight = 1;
+    this.canvasBackingScale = 1;
     this.renderFrameId = null;
+    this.pendingDomRender = false;
     this.resizeFrameId = null;
     this.positionFrameId = null;
     this.staticCanvas = activeDocument.createElement("canvas");
+    this.staticCanvas.width = 1;
+    this.staticCanvas.height = 1;
     this.staticCtx = null;
     this.staticCacheDirty = true;
+    this.scrollContainer = null;
     this.scrollEventTarget = null;
     this.layoutMeasureEl = null;
     this.drawingsLoaded = false;
@@ -2142,6 +2157,9 @@ var PreviewDrawingController = class {
     this.onFormatToolbarDragEnd = this.onFormatToolbarDragEnd.bind(this);
   }
   async mount() {
+    if (this.destroyed) {
+      return;
+    }
     cleanupDrawingUi(this.previewEl);
     this.previewEl._noteDrawController = this;
     this.previewEl.addClass("notedraw-shell");
@@ -2290,7 +2308,11 @@ var PreviewDrawingController = class {
       this.persistCurrentBrushSettings();
     });
     this.embedLayer = this.previewEl.createDiv({ cls: "notedraw-embed-layer" });
+    this.staticCanvas.classList.add("notedraw-static-canvas");
+    this.previewEl.appendChild(this.staticCanvas);
     this.canvas = this.previewEl.createEl("canvas", { cls: "notedraw-canvas" });
+    this.canvas.width = 1;
+    this.canvas.height = 1;
     this.canvas.addEventListener("pointerdown", this.onPointerDown);
     this.canvas.addEventListener("pointermove", this.onPointerMove);
     this.canvas.addEventListener("pointerup", this.onPointerUp);
@@ -2311,8 +2333,7 @@ var PreviewDrawingController = class {
         this.resizeObserver.observe(this.layoutMeasureEl);
       }
     }
-    this.scrollEventTarget = getScrollEventTarget(findScrollableAncestor(this.previewEl));
-    this.scrollEventTarget?.addEventListener("scroll", this.onScroll, { passive: true });
+    this.refreshScrollContainer();
     this.updateToolButtons();
     this.syncPaletteInputs();
     this.refreshLocalizedLabels();
@@ -2418,10 +2439,13 @@ var PreviewDrawingController = class {
     return this.plugin.installHeaderButton(this);
   }
   async setFile(file) {
-    if (!file || this.file?.path === file.path) {
+    if (this.destroyed || !file || this.file?.path === file.path) {
       return;
     }
     this.endTextEdit();
+    this.cancelRenderFrame();
+    this.cancelResizeFrame();
+    this.resetCanvasSurface();
     this.file = file;
     this.currentStroke = null;
     this.pointerDown = false;
@@ -2464,7 +2488,32 @@ var PreviewDrawingController = class {
       this.render();
     }
   }
+  resetCanvasSurface() {
+    this.previewEl.removeClass("has-notedraw-canvas");
+    this.ctx = null;
+    this.staticCtx = null;
+    this.canvasCssWidth = 1;
+    this.canvasCssHeight = 1;
+    this.canvasWindowTop = 0;
+    this.canvasRenderHeight = 1;
+    this.canvasBackingScale = 1;
+    for (const canvas of [this.staticCanvas, this.canvas]) {
+      if (!canvas) {
+        continue;
+      }
+      canvas.width = 1;
+      canvas.height = 1;
+      for (const property of ["top", "width", "height", "min-width"]) {
+        canvas.style.removeProperty(property);
+      }
+    }
+    this.invalidateStaticCache();
+  }
   destroy() {
+    if (this.destroyed) {
+      return;
+    }
+    this.destroyed = true;
     this.endTextEdit();
     this.endFloatingTextInput(false);
     this.clearButtonLongPress();
@@ -2473,6 +2522,7 @@ var PreviewDrawingController = class {
     this.cancelPositionFrame();
     this.resizeObserver?.disconnect();
     this.scrollEventTarget?.removeEventListener("scroll", this.onScroll);
+    this.scrollContainer = null;
     this.scrollEventTarget = null;
     this.layoutMeasureEl = null;
     window.removeEventListener("resize", this.onResize);
@@ -2499,6 +2549,7 @@ var PreviewDrawingController = class {
     this.embedNodes.clear();
     this.embedRenderTokens.clear();
     this.canvasImageCache.clear();
+    this.staticCanvas?.remove();
     this.canvas?.remove();
     this.previewEl.removeClass("notedraw-shell");
     this.previewEl.removeClass("is-drawing-active");
@@ -2512,14 +2563,28 @@ var PreviewDrawingController = class {
     this.previewEl.removeClass("is-notedraw-source-shell");
     this.previewEl.removeClass("is-notedraw-webview-shell");
     this.previewEl.removeClass("has-notedraw-body-controls");
+    this.previewEl.removeClass("has-notedraw-canvas");
     this.previewEl.removeClass("is-resizing-selection");
     this.previewEl.removeClass("is-native-text-editing");
     this.clearSelectionLongPress();
     if (this.previewEl._noteDrawController === this) {
       delete this.previewEl._noteDrawController;
     }
+    if (this.plugin.controllers?.get(this.previewEl) === this) {
+      this.plugin.controllers.delete(this.previewEl);
+    }
+    if (this.plugin.sourceControllers?.get(this.view) === this) {
+      this.plugin.sourceControllers.delete(this.view);
+    }
+    if (this.plugin.webviewControllers?.get(this.previewEl) === this) {
+      this.plugin.webviewControllers.delete(this.previewEl);
+    }
+    this.plugin.liveControllers?.delete(this);
   }
   async toggle() {
+    if (this.destroyed) {
+      return;
+    }
     this.active = !this.active;
     this.previewEl.toggleClass("is-drawing-active", this.active);
     this.syncFloatingControlClasses();
@@ -2569,10 +2634,15 @@ var PreviewDrawingController = class {
     await this.loadingDrawings;
   }
   onResize() {
-    this.scheduleResize();
+    if (this.active || this.drawingsLoaded || this.ctx) {
+      this.scheduleResize();
+    }
   }
   onScroll() {
     this.scheduleFloatingControlsPosition();
+    if (this.active || this.drawingsLoaded || this.ctx) {
+      this.scheduleResize();
+    }
   }
   scheduleResize() {
     if (this.resizeFrameId !== null) {
@@ -2580,10 +2650,12 @@ var PreviewDrawingController = class {
     }
     this.resizeFrameId = window.requestAnimationFrame(() => {
       this.resizeFrameId = null;
-      this.resizeCanvas();
+      const canvasChanged = this.resizeCanvas();
       this.updateFloatingControlsPosition();
       this.positionFormatToolbar();
-      this.render();
+      if (canvasChanged) {
+        this.render();
+      }
     });
   }
   cancelResizeFrame() {
@@ -2607,6 +2679,17 @@ var PreviewDrawingController = class {
       window.cancelAnimationFrame(this.positionFrameId);
       this.positionFrameId = null;
     }
+  }
+  refreshScrollContainer() {
+    const nextContainer = findScrollableAncestor(this.previewEl);
+    const nextTarget = getScrollEventTarget(nextContainer);
+    if (nextContainer === this.scrollContainer && nextTarget === this.scrollEventTarget) {
+      return;
+    }
+    this.scrollEventTarget?.removeEventListener("scroll", this.onScroll);
+    this.scrollContainer = nextContainer;
+    this.scrollEventTarget = nextTarget;
+    this.scrollEventTarget?.addEventListener("scroll", this.onScroll, { passive: true });
   }
   scheduleLayoutRefresh() {
     this.scheduleResize();
@@ -3456,31 +3539,85 @@ var PreviewDrawingController = class {
     );
   }
   resizeCanvas() {
+    this.refreshScrollContainer();
     this.layoutMeasureEl = findLayoutMeasureElement(this.previewEl);
     const measured = measureCanvasExtent(this.previewEl, this.layoutMeasureEl);
-    const ratio = window.devicePixelRatio || 1;
     const width = Math.max(1, Math.round(measured.width));
     const height = Math.max(1, Math.round(measured.height));
+    const visible = measureVisibleSurfaceWindow(this.previewEl, this.scrollContainer, height);
+    const isMobile = Boolean(Platform.isMobileApp);
+    const devicePixelRatio = window.devicePixelRatio || 1;
+    const maxDevicePixelRatio = isMobile ? 4 : 3;
+    const maxPixels = isMobile ? 6 * 1024 * 1024 : 16 * 1024 * 1024;
+    const maxWindowHeight = calculateQualityWindowLimit({
+      cssWidth: width,
+      viewportHeight: visible.height,
+      devicePixelRatio,
+      maxDevicePixelRatio,
+      maxPixels
+    });
+    // A whole-note bitmap can exhaust mobile GPU memory on long notes.
+    const canvasWindow = calculateCanvasWindow({
+      documentHeight: height,
+      viewportTop: visible.top,
+      viewportHeight: visible.height,
+      previousTop: this.canvasWindowTop,
+      previousHeight: this.canvasRenderHeight,
+      maxWindowHeight
+    });
+    const backingStore = calculateCanvasBackingStore({
+      cssWidth: width,
+      cssHeight: canvasWindow.height,
+      devicePixelRatio,
+      maxDevicePixelRatio,
+      maxDimension: isMobile ? 8192 : 16384,
+      maxPixels
+    });
+    const geometryChanged = width !== this.canvasCssWidth || height !== this.canvasCssHeight || canvasWindow.changed || Math.abs(backingStore.scale - this.canvasBackingScale) > 1e-6;
+    const backingStoreChanged = this.canvas.width !== backingStore.width || this.canvas.height !== backingStore.height;
     this.canvasCssWidth = width;
     this.canvasCssHeight = height;
-    applyElementStyles(this.canvas, {
-      width: `${width}px`,
-      height: `${height}px`
-    });
-    this.canvas.width = Math.round(width * ratio);
-    this.canvas.height = Math.round(height * ratio);
+    this.canvasWindowTop = canvasWindow.top;
+    this.canvasRenderHeight = canvasWindow.height;
+    this.canvasBackingScale = backingStore.scale;
+    for (const canvas of [this.staticCanvas, this.canvas]) {
+      applyElementStyles(canvas, {
+        top: `${canvasWindow.top}px`,
+        width: `${width}px`,
+        height: `${canvasWindow.height}px`
+      });
+    }
+    if (backingStoreChanged) {
+      this.canvas.width = backingStore.width;
+      this.canvas.height = backingStore.height;
+    }
     this.ctx = this.canvas.getContext("2d");
-    this.ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
-    if (this.staticCanvas.width !== this.canvas.width || this.staticCanvas.height !== this.canvas.height) {
-      this.staticCanvas.width = this.canvas.width;
-      this.staticCanvas.height = this.canvas.height;
+    if (!this.ctx) {
+      return false;
+    }
+    this.ctx.setTransform(backingStore.scale, 0, 0, backingStore.scale, 0, -canvasWindow.top * backingStore.scale);
+    if (this.staticCanvas.width !== backingStore.width || this.staticCanvas.height !== backingStore.height) {
+      this.staticCanvas.width = backingStore.width;
+      this.staticCanvas.height = backingStore.height;
       this.staticCtx = this.staticCanvas.getContext("2d");
+    }
+    if (!this.staticCtx) {
+      this.staticCtx = this.staticCanvas.getContext("2d");
+    }
+    if (!this.staticCtx) {
+      return false;
+    }
+    this.staticCtx.setTransform(backingStore.scale, 0, 0, backingStore.scale, 0, -canvasWindow.top * backingStore.scale);
+    if (geometryChanged || backingStoreChanged) {
       this.invalidateStaticCache();
     }
-    this.staticCtx?.setTransform(ratio, 0, 0, ratio, 0, 0);
     if (measured.visibleWidth > 0) {
-      applyElementStyles(this.canvas, { minWidth: `${Math.round(measured.visibleWidth)}px` });
+      for (const canvas of [this.staticCanvas, this.canvas]) {
+        applyElementStyles(canvas, { minWidth: `${Math.round(measured.visibleWidth)}px` });
+      }
     }
+    this.previewEl.addClass("has-notedraw-canvas");
+    return geometryChanged || backingStoreChanged;
   }
   onPointerDown(event) {
     if (!this.active || event.button !== 0) {
@@ -4189,7 +4326,7 @@ var PreviewDrawingController = class {
     }
     this.releasePointerCapture(event.pointerId);
     this.clearSelectionDragState();
-    this.requestRender();
+    this.requestRender(true);
     event.preventDefault();
     event.stopPropagation();
   }
@@ -4252,13 +4389,18 @@ var PreviewDrawingController = class {
       return;
     }
     const point = this.eventToPoint(event);
-    const originalPoints = Array.from(this.dragStrokeOriginalPoints.values()).flat();
-    const xs = originalPoints.map((strokePoint) => strokePoint.x);
-    const ys = originalPoints.map((strokePoint) => strokePoint.y);
-    const minX = Math.min(...xs);
-    const maxX = Math.max(...xs);
-    const minY = Math.min(...ys);
-    const maxY = Math.max(...ys);
+    let minX = 1;
+    let maxX = 0;
+    let minY = 1;
+    let maxY = 0;
+    for (const points of this.dragStrokeOriginalPoints.values()) {
+      for (const strokePoint of points) {
+        minX = Math.min(minX, strokePoint.x);
+        maxX = Math.max(maxX, strokePoint.x);
+        minY = Math.min(minY, strokePoint.y);
+        maxY = Math.max(maxY, strokePoint.y);
+      }
+    }
     const dx = clamp(point.x - this.dragStrokeStartPoint.x, -minX, 1 - maxX);
     const dy = clamp(point.y - this.dragStrokeStartPoint.y, -minY, 1 - maxY);
     const movedDistance = pointDistanceOnCanvas(
@@ -4289,7 +4431,7 @@ var PreviewDrawingController = class {
         y: clamp(strokePoint.y + snappedDy, 0, 1)
       }));
     }
-    this.requestRender();
+    this.requestRender(this.selectionHasDomStrokes());
     event.preventDefault();
     event.stopPropagation();
   }
@@ -4389,7 +4531,7 @@ var PreviewDrawingController = class {
       this.resizeSelectionMoved = true;
     }
     this.applySelectedStrokeResize(point);
-    this.requestRender();
+    this.requestRender(this.selectionHasDomStrokes());
     event.preventDefault();
     event.stopPropagation();
   }
@@ -4534,9 +4676,9 @@ var PreviewDrawingController = class {
   eventToPoint(event) {
     const rect = this.canvas.getBoundingClientRect();
     const x = event.clientX - rect.left;
-    const y = event.clientY - rect.top;
-    const width = Math.max(1, rect.width);
-    const height = Math.max(1, rect.height);
+    const y = event.clientY - rect.top + this.canvasWindowTop;
+    const width = this.canvasWidth();
+    const height = this.canvasHeight();
     return {
       x: clamp(x / width, 0, 1),
       y: clamp(y / height, 0, 1),
@@ -4555,13 +4697,20 @@ var PreviewDrawingController = class {
   canvasHeight() {
     return Math.max(1, this.canvasCssHeight || this.canvas?.clientHeight || 1);
   }
-  requestRender() {
+  requestRender(refreshDom = false) {
+    this.pendingDomRender = this.pendingDomRender || refreshDom;
     if (this.renderFrameId !== null) {
       return;
     }
     this.renderFrameId = window.requestAnimationFrame(() => {
       this.renderFrameId = null;
-      this.render();
+      const shouldRefreshDom = this.pendingDomRender;
+      this.pendingDomRender = false;
+      if (shouldRefreshDom) {
+        this.render();
+      } else {
+        this.renderCanvas();
+      }
     });
   }
   cancelRenderFrame() {
@@ -4569,6 +4718,7 @@ var PreviewDrawingController = class {
       window.cancelAnimationFrame(this.renderFrameId);
       this.renderFrameId = null;
     }
+    this.pendingDomRender = false;
   }
   render() {
     if (!this.ctx) {
@@ -4576,13 +4726,16 @@ var PreviewDrawingController = class {
     }
     this.applyWebEdits();
     this.updateEmbedLayer();
-    this.ctx.clearRect(0, 0, this.canvasWidth(), this.canvasHeight());
-    this.ensureStaticCache();
-    if (this.staticCanvas.width > 0 && this.staticCanvas.height > 0) {
-      this.ctx.drawImage(this.staticCanvas, 0, 0, this.canvasWidth(), this.canvasHeight());
+    this.renderCanvas();
+  }
+  renderCanvas() {
+    if (!this.ctx) {
+      return;
     }
+    clearCanvasContext(this.ctx, this.canvas);
+    this.ensureStaticCache();
     for (const [index, stroke] of this.drawingData.strokes.entries()) {
-      if (this.isStrokeSelected(index)) {
+      if (this.isStrokeSelected(index) && this.isStrokeInCanvasWindow(stroke)) {
         this.drawStroke(stroke, this.selectedStrokeAlpha());
       }
     }
@@ -4598,9 +4751,9 @@ var PreviewDrawingController = class {
     if (!this.staticCtx || !this.staticCacheDirty) {
       return;
     }
-    this.staticCtx.clearRect(0, 0, this.canvasWidth(), this.canvasHeight());
+    clearCanvasContext(this.staticCtx, this.staticCanvas);
     for (const [index, stroke] of this.drawingData.strokes.entries()) {
-      if (!this.isStrokeSelected(index)) {
+      if (!this.isStrokeSelected(index) && this.isStrokeInCanvasWindow(stroke)) {
         this.drawStrokeOn(this.staticCtx, stroke);
       }
     }
@@ -4608,6 +4761,19 @@ var PreviewDrawingController = class {
   }
   invalidateStaticCache() {
     this.staticCacheDirty = true;
+  }
+  isStrokeInCanvasWindow(stroke) {
+    const bounds = getStrokeBounds(stroke, this.canvasWidth(), this.canvasHeight());
+    if (!bounds) {
+      return false;
+    }
+    const padding = Math.max(32, Number(stroke.width || 0) + this.selectionHitPaddingPx());
+    return rectsIntersect(bounds, {
+      minX: -padding,
+      minY: this.canvasWindowTop - padding,
+      maxX: this.canvasWidth() + padding,
+      maxY: this.canvasWindowTop + this.canvasRenderHeight + padding
+    });
   }
   drawStroke(stroke, alpha = 1) {
     this.drawStrokeOn(this.ctx, stroke, alpha);
@@ -5033,6 +5199,12 @@ var PreviewDrawingController = class {
   }
   isStrokeSelected(index) {
     return this.selectedStrokeIndexes.has(index) || !this.selectedStrokeIndexes.size && this.selectedStrokeIndex === index;
+  }
+  selectionHasDomStrokes() {
+    return this.getSelectedStrokeIndexes().some((index) => {
+      const stroke = this.drawingData.strokes[index];
+      return isEmbedStroke(stroke) || isRichTextStroke(stroke);
+    });
   }
   getSelectedStrokeBounds() {
     const indexes = this.getSelectedStrokeIndexes();
@@ -6666,8 +6838,8 @@ function cleanupAllDrawingHeaderButtons() {
   activeDocument.body?.querySelectorAll?.(".notedraw-body-control, .notedraw-file-input").forEach((element) => element.remove());
 }
 function cleanupDrawingUi(preview) {
-  preview.querySelectorAll(".notedraw-button, .notedraw-fallback-button, .notedraw-webview-button, .notedraw-toolbar, .notedraw-palette-panel, .notedraw-text-panel, .notedraw-selection-menu, .notedraw-format-toolbar, .notedraw-embed-layer, .notedraw-file-input, .notedraw-canvas").forEach((element) => element.remove());
-  preview.classList.remove("notedraw-shell", "is-drawing-active", "is-drawing-hidden", "is-select-mode", "is-palette-open", "is-text-panel-open", "is-selection-menu-open", "is-watercolor-mode", "is-edit-md-mode", "is-selecting-strokes", "is-resizing-selection", "is-native-text-editing", "is-notedraw-webview-shell", "has-notedraw-body-controls");
+  preview.querySelectorAll(".notedraw-button, .notedraw-fallback-button, .notedraw-webview-button, .notedraw-toolbar, .notedraw-palette-panel, .notedraw-text-panel, .notedraw-selection-menu, .notedraw-format-toolbar, .notedraw-embed-layer, .notedraw-file-input, .notedraw-static-canvas, .notedraw-canvas").forEach((element) => element.remove());
+  preview.classList.remove("notedraw-shell", "is-drawing-active", "is-drawing-hidden", "is-select-mode", "is-palette-open", "is-text-panel-open", "is-selection-menu-open", "is-watercolor-mode", "is-edit-md-mode", "is-selecting-strokes", "is-resizing-selection", "is-native-text-editing", "is-notedraw-webview-shell", "has-notedraw-body-controls", "has-notedraw-canvas");
 }
 function isWebviewSyncMutation(mutation) {
   if (!mutation) {
@@ -7425,18 +7597,19 @@ function findLayoutMeasureElement(previewEl) {
 function measureCanvasExtent(previewEl, measureEl = null) {
   const previewRect = previewEl.getBoundingClientRect();
   const measureRect = measureEl?.getBoundingClientRect?.();
+  const measureIsPreview = !measureEl || measureEl === previewEl;
   const width = Math.max(
-    previewEl.scrollWidth || 0,
+    measureIsPreview ? previewEl.scrollWidth || 0 : 0,
     measureEl?.scrollWidth || 0,
     measureEl?.offsetWidth || 0,
     previewRect.width || 0,
     measureRect?.width || 0
   );
   const height = Math.max(
-    previewEl.scrollHeight || 0,
+    measureIsPreview ? previewEl.scrollHeight || 0 : 0,
     measureEl?.scrollHeight || 0,
     measureEl?.offsetHeight || 0,
-    previewEl.offsetHeight || 0,
+    measureIsPreview ? previewEl.offsetHeight || 0 : 0,
     previewRect.height || 0,
     measureRect?.height || 0
   );
@@ -7445,6 +7618,38 @@ function measureCanvasExtent(previewEl, measureEl = null) {
     height: Math.max(1, height),
     visibleWidth: Math.max(1, previewRect.width || width)
   };
+}
+function measureVisibleSurfaceWindow(previewEl, scrollContainer, documentHeight) {
+  const height = Math.max(1, Number(documentHeight) || 1);
+  const previewRect = previewEl?.getBoundingClientRect?.();
+  if (scrollContainer === previewEl) {
+    const viewportHeight = Math.max(1, previewEl.clientHeight || previewRect?.height || window.innerHeight || 1);
+    return {
+      top: clamp(Number(previewEl.scrollTop) || 0, 0, Math.max(0, height - viewportHeight)),
+      height: Math.min(height, viewportHeight)
+    };
+  }
+  const viewportRect = scrollContainer?.getBoundingClientRect?.() || {
+    top: 0,
+    bottom: window.innerHeight || height,
+    height: window.innerHeight || height
+  };
+  const surfaceTop = previewRect?.top || 0;
+  const viewportTop = Math.max(0, viewportRect.top - surfaceTop);
+  const viewportBottom = Math.min(height, (viewportRect.bottom || viewportRect.top + viewportRect.height) - surfaceTop);
+  return {
+    top: clamp(viewportTop, 0, Math.max(0, height - 1)),
+    height: Math.max(1, viewportBottom - viewportTop || viewportRect.height || window.innerHeight || 1)
+  };
+}
+function clearCanvasContext(context, canvas) {
+  if (!context || !canvas) {
+    return;
+  }
+  context.save();
+  context.setTransform(1, 0, 0, 1, 0, 0);
+  context.clearRect(0, 0, canvas.width, canvas.height);
+  context.restore();
 }
 function getScrollEventTarget(scroller) {
   if (!scroller) {
@@ -7591,13 +7796,23 @@ function getStrokeBounds(stroke, width, height) {
       maxY: y + fontSize * 1.28 + paddingY
     };
   }
-  const xs = stroke.points.map((point) => point.x * width);
-  const ys = stroke.points.map((point) => point.y * height);
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const point of stroke.points) {
+    const x = point.x * width;
+    const y = point.y * height;
+    minX = Math.min(minX, x);
+    minY = Math.min(minY, y);
+    maxX = Math.max(maxX, x);
+    maxY = Math.max(maxY, y);
+  }
   return {
-    minX: Math.min(...xs),
-    minY: Math.min(...ys),
-    maxX: Math.max(...xs),
-    maxY: Math.max(...ys)
+    minX,
+    minY,
+    maxX,
+    maxY
   };
 }
 function normalizeCanvasRect(a, b) {
@@ -7739,25 +7954,33 @@ function getPenOffsets(count, width) {
   return offsets;
 }
 function strokeHitTest(stroke, hitPoint, width, height, threshold) {
-  if (isEmbedStroke(stroke) || isRichTextStroke(stroke)) {
-    const bounds = getStrokeBounds(stroke, width, height);
-    return Boolean(bounds) && hitPoint.x >= bounds.minX - threshold && hitPoint.x <= bounds.maxX + threshold && hitPoint.y >= bounds.minY - threshold && hitPoint.y <= bounds.maxY + threshold;
+  const bounds = getStrokeBounds(stroke, width, height);
+  const insideBounds = Boolean(bounds) && hitPoint.x >= bounds.minX - threshold && hitPoint.x <= bounds.maxX + threshold && hitPoint.y >= bounds.minY - threshold && hitPoint.y <= bounds.maxY + threshold;
+  if (!insideBounds) {
+    return false;
   }
-  if (isTextStroke(stroke)) {
-    const bounds = getStrokeBounds(stroke, width, height);
-    return Boolean(bounds) && hitPoint.x >= bounds.minX - threshold && hitPoint.x <= bounds.maxX + threshold && hitPoint.y >= bounds.minY - threshold && hitPoint.y <= bounds.maxY + threshold;
+  if (isEmbedStroke(stroke) || isRichTextStroke(stroke) || isTextStroke(stroke)) {
+    return true;
   }
-  const points = stroke.points.map((point) => ({
-    x: point.x * width,
-    y: point.y * height
-  }));
-  if (points.length === 1) {
-    return pointerDistance(points[0], hitPoint) <= threshold;
+  if (stroke.points.length === 1) {
+    return pointerDistance({
+      x: stroke.points[0].x * width,
+      y: stroke.points[0].y * height
+    }, hitPoint) <= threshold;
   }
-  for (let index = 1; index < points.length; index += 1) {
-    if (distanceToSegment(hitPoint, points[index - 1], points[index]) <= threshold) {
+  let previous = {
+    x: stroke.points[0].x * width,
+    y: stroke.points[0].y * height
+  };
+  for (let index = 1; index < stroke.points.length; index += 1) {
+    const current = {
+      x: stroke.points[index].x * width,
+      y: stroke.points[index].y * height
+    };
+    if (distanceToSegment(hitPoint, previous, current) <= threshold) {
       return true;
     }
+    previous = current;
   }
   return false;
 }
