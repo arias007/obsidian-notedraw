@@ -208,3 +208,43 @@ test("implausible first-line anchors fall back to document-relative height", () 
   assert.equal(projected.y, 750);
   assert.equal(projected.primaryAnchoredToLine, false);
 });
+
+test("real Markdown line anchors beat document-ratio drift for element frames", () => {
+  const layout = createElementLayout({
+    id: "real-line-anchor",
+    bounds: { minX: 120, minY: 500, maxX: 260, maxY: 620 },
+    canvasWidth: 500,
+    canvasHeight: 2000,
+    viewportHeight: 800,
+    frame: { left: 40, width: 420 },
+    sourcePath: "Notes/example.md",
+    cornerLocations: {
+      topLeft: { path: "Notes/example.md", line: 48.5 },
+      topRight: { path: "Notes/example.md", line: 48.5 }
+    }
+  });
+  const projected = projectElementLayout(layout, {
+    canvasWidth: 500,
+    canvasHeight: 3600,
+    viewportHeight: 850,
+    frame: { left: 40, width: 420 },
+    lineToCanvasY: () => 2200
+  });
+
+  assert.equal(projected.y, 2200);
+  assert.equal(projected.primaryAnchoredToLine, true);
+});
+
+test("relation stabilization pulls elements together while respecting note anchors", () => {
+  const first = makeLayout("relation-anchor-a", 100, 100, 120, 100);
+  const second = makeLayout("relation-anchor-b", 200, 100, 120, 100);
+  first.relations = [{ targetId: "relation-anchor-b", kind: "near", sourceCorner: "topRight", targetCorner: "topLeft", dx: 20, dy: 0, weight: 0.14 }];
+  const before = [
+    { id: "relation-anchor-a", x: 100, y: 100, width: 120, height: 100, scale: 1, anchorX: 100, anchorY: 100, primaryAnchoredToLine: true },
+    { id: "relation-anchor-b", x: 360, y: 100, width: 120, height: 100, scale: 1, anchorX: 360, anchorY: 100, primaryAnchoredToLine: true }
+  ];
+  const after = stabilizeElementRelations(before, new Map([[first.id, first], [second.id, second]]));
+
+  assert.ok(after[0].x > before[0].x + 20);
+  assert.ok(after[0].x <= before[0].anchorX + 84);
+});

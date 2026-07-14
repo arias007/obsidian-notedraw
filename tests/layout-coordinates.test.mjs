@@ -186,3 +186,24 @@ test("legacy fractional first-line anchors cannot pull middle-page elements toge
 
   assert.equal(projected.y, 0.45);
 });
+
+test("real Markdown line anchors may move farther than document-relative height across views", () => {
+  const projected = projectResponsivePoint({
+    x: 0.5,
+    y: 0.42,
+    anchor: {
+      basis: RESPONSIVE_POINT_BASIS,
+      x: 0.5,
+      y: 0.42,
+      path: "Notes/example.md",
+      line: 42.4
+    }
+  }, {
+    canvasWidth: 400,
+    canvasHeight: 3000,
+    frame: { left: 20, width: 360 },
+    lineToCanvasY: () => 2050
+  });
+
+  assert.equal(projected.y, 2050 / 3000);
+});

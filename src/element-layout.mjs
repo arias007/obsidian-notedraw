@@ -178,10 +178,14 @@ function projectCorner(corner, target, lineToCanvasY) {
     : NaN;
   const firstLineIsPlausible = corner.line === null || corner.line >= 1 || corner.y <= 0.15;
   const maxLineShift = Math.max(96, Math.min(frame.documentHeight * 0.18, frame.viewportHeight * 0.45));
-  const canUseLine = Number.isFinite(lineY) && firstLineIsPlausible && Math.abs(lineY - fallbackY) <= maxLineShift;
+  const lineShiftIsPlausible = corner.line !== null && corner.line >= 1
+    ? true
+    : Math.abs(lineY - fallbackY) <= maxLineShift;
+  const canUseLine = Number.isFinite(lineY) && firstLineIsPlausible && lineShiftIsPlausible;
   return {
     x: frame.contentLeft + corner.x * frame.contentWidth,
     y: canUseLine ? lineY : fallbackY,
+    fallbackY,
     lineAnchored: canUseLine
   };
 }
@@ -228,6 +232,7 @@ export function projectElementLayout(layoutInput, {
   let scale = calculateElementScale(layout.sourceFrame, targetFrame, layout.box);
   const projectedRight = projectCorner(layout.corners.topRight, targetFrame, lineToCanvasY);
   const projectedBottom = projectCorner(layout.corners.bottomLeft, targetFrame, lineToCanvasY);
+  const projectedBottomRight = projectCorner(layout.corners.bottomRight, targetFrame, lineToCanvasY);
   const cornerScales = [];
   if (projectedRight && layout.box.width > 0.01) {
     cornerScales.push(Math.abs(projectedRight.x - primary.x) / layout.box.width);
@@ -235,22 +240,34 @@ export function projectElementLayout(layoutInput, {
   if (projectedBottom?.lineAnchored && primary.lineAnchored && layout.box.height > 0.01) {
     cornerScales.push(Math.abs(projectedBottom.y - primary.y) / layout.box.height);
   }
+  if (projectedBottomRight?.lineAnchored && projectedRight?.lineAnchored && layout.box.height > 0.01) {
+    cornerScales.push(Math.abs(projectedBottomRight.y - projectedRight.y) / layout.box.height);
+  }
   const reliableCornerScales = cornerScales.filter((value) => Number.isFinite(value) && value >= scale * 0.45 && value <= scale * 2.2);
   if (reliableCornerScales.length) {
     const cornerScale = reliableCornerScales.reduce((sum, value) => sum + value, 0) / reliableCornerScales.length;
     scale = clamp(scale * 0.72 + cornerScale * 0.28, scale * 0.72, scale * 1.28);
   }
+  let x = primary.x;
+  if (projectedBottom && Number.isFinite(projectedBottom.x) && Math.abs(projectedBottom.x - primary.x) <= Math.max(24, layout.box.width * scale * 0.25)) {
+    x = (primary.x + projectedBottom.x) / 2;
+  }
+  const y = primary.y;
   const width = Math.max(0.01, layout.box.width * scale);
   const height = Math.max(0.01, layout.box.height * scale);
   const maxX = Math.max(0, targetFrame.surfaceWidth - width);
   const maxY = Math.max(0, targetFrame.documentHeight - height);
+  const clampedX = clamp(x, 0, maxX);
+  const clampedY = clamp(y, 0, maxY);
   return {
     id: layout.id,
-    x: clamp(primary.x, 0, maxX),
-    y: clamp(primary.y, 0, maxY),
+    x: clampedX,
+    y: clampedY,
     width,
     height,
     scale,
+    anchorX: clampedX,
+    anchorY: clampedY,
     primaryAnchoredToLine: primary.lineAnchored
   };
 }
@@ -386,7 +403,10 @@ export function stabilizeElementRelations(projectedItems, layouts) {
       const targetCorner = boxCorner(target, relation.targetCorner);
       const expectedX = targetCorner.x - relation.dx * relationScale - sourceOffset.x;
       const expectedY = targetCorner.y - relation.dy * relationScale - sourceOffset.y;
-      const limit = Math.min(28, Math.max(8, Math.min(source.width, source.height) * 0.18));
+      const minSize = Math.min(source.width, source.height);
+      const limit = relation.kind === "near"
+        ? Math.min(72, Math.max(24, minSize * 0.35))
+        : Math.min(96, Math.max(32, minSize * 0.5));
       const current = corrections.get(source.id) || { x: 0, y: 0, weight: 0 };
       current.x += clamp(expectedX - source.x, -limit, limit) * relation.weight;
       current.y += clamp(expectedY - source.y, -limit, limit) * relation.weight;
@@ -399,11 +419,16 @@ export function stabilizeElementRelations(projectedItems, layouts) {
     if (!correction) {
       return item;
     }
-    const divisor = Math.max(1, correction.weight);
+    const divisor = Math.max(0.001, correction.weight);
+    const blend = item.primaryAnchoredToLine ? 0.65 : 0.9;
+    const nextX = item.x + (correction.x / divisor) * blend;
+    const nextY = item.y + (correction.y / divisor) * blend;
+    const anchorFenceX = Math.max(36, Math.min(120, item.width * (item.primaryAnchoredToLine ? 0.7 : 1.2)));
+    const anchorFenceY = Math.max(36, Math.min(140, item.height * (item.primaryAnchoredToLine ? 0.8 : 1.5)));
     return {
       ...item,
-      x: item.x + correction.x / divisor,
-      y: item.y + correction.y / divisor
+      x: Number.isFinite(item.anchorX) ? clamp(nextX, item.anchorX - anchorFenceX, item.anchorX + anchorFenceX) : nextX,
+      y: Number.isFinite(item.anchorY) ? clamp(nextY, item.anchorY - anchorFenceY, item.anchorY + anchorFenceY) : nextY
     };
   });
 }

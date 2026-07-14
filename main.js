@@ -229,7 +229,8 @@ function projectResponsivePoint(point, {
   const canvasX = normalizedFrame.left + anchor.x * normalizedFrame.width;
   const fallbackCanvasY = anchor.y * height;
   const firstLineIsPlausible = anchor.line === null || anchor.line >= 1 || anchor.y <= 0.15;
-  const canUseLineAnchor = Number.isFinite(anchoredY) && firstLineIsPlausible && Math.abs(anchoredY - fallbackCanvasY) <= Math.max(96, height * 0.18);
+  const lineShiftIsPlausible = anchor.line !== null && anchor.line >= 1 ? true : Math.abs(anchoredY - fallbackCanvasY) <= Math.max(96, height * 0.18);
+  const canUseLineAnchor = Number.isFinite(anchoredY) && firstLineIsPlausible && lineShiftIsPlausible;
   const canvasY = canUseLineAnchor ? anchoredY : fallbackCanvasY;
   return {
     ...point,
@@ -403,10 +404,12 @@ function projectCorner(corner, target, lineToCanvasY) {
   const lineY = corner.line !== null && typeof lineToCanvasY === "function" ? Number(lineToCanvasY(corner.path, corner.line)) : NaN;
   const firstLineIsPlausible = corner.line === null || corner.line >= 1 || corner.y <= 0.15;
   const maxLineShift = Math.max(96, Math.min(frame.documentHeight * 0.18, frame.viewportHeight * 0.45));
-  const canUseLine = Number.isFinite(lineY) && firstLineIsPlausible && Math.abs(lineY - fallbackY) <= maxLineShift;
+  const lineShiftIsPlausible = corner.line !== null && corner.line >= 1 ? true : Math.abs(lineY - fallbackY) <= maxLineShift;
+  const canUseLine = Number.isFinite(lineY) && firstLineIsPlausible && lineShiftIsPlausible;
   return {
     x: frame.contentLeft + corner.x * frame.contentWidth,
     y: canUseLine ? lineY : fallbackY,
+    fallbackY,
     lineAnchored: canUseLine
   };
 }
@@ -450,6 +453,7 @@ function projectElementLayout(layoutInput, {
   let scale = calculateElementScale(layout.sourceFrame, targetFrame, layout.box);
   const projectedRight = projectCorner(layout.corners.topRight, targetFrame, lineToCanvasY);
   const projectedBottom = projectCorner(layout.corners.bottomLeft, targetFrame, lineToCanvasY);
+  const projectedBottomRight = projectCorner(layout.corners.bottomRight, targetFrame, lineToCanvasY);
   const cornerScales = [];
   if (projectedRight && layout.box.width > 0.01) {
     cornerScales.push(Math.abs(projectedRight.x - primary.x) / layout.box.width);
@@ -457,22 +461,34 @@ function projectElementLayout(layoutInput, {
   if (projectedBottom?.lineAnchored && primary.lineAnchored && layout.box.height > 0.01) {
     cornerScales.push(Math.abs(projectedBottom.y - primary.y) / layout.box.height);
   }
+  if (projectedBottomRight?.lineAnchored && projectedRight?.lineAnchored && layout.box.height > 0.01) {
+    cornerScales.push(Math.abs(projectedBottomRight.y - projectedRight.y) / layout.box.height);
+  }
   const reliableCornerScales = cornerScales.filter((value) => Number.isFinite(value) && value >= scale * 0.45 && value <= scale * 2.2);
   if (reliableCornerScales.length) {
     const cornerScale = reliableCornerScales.reduce((sum, value) => sum + value, 0) / reliableCornerScales.length;
     scale = clamp3(scale * 0.72 + cornerScale * 0.28, scale * 0.72, scale * 1.28);
   }
+  let x = primary.x;
+  if (projectedBottom && Number.isFinite(projectedBottom.x) && Math.abs(projectedBottom.x - primary.x) <= Math.max(24, layout.box.width * scale * 0.25)) {
+    x = (primary.x + projectedBottom.x) / 2;
+  }
+  const y = primary.y;
   const width = Math.max(0.01, layout.box.width * scale);
   const height = Math.max(0.01, layout.box.height * scale);
   const maxX = Math.max(0, targetFrame.surfaceWidth - width);
   const maxY = Math.max(0, targetFrame.documentHeight - height);
+  const clampedX = clamp3(x, 0, maxX);
+  const clampedY = clamp3(y, 0, maxY);
   return {
     id: layout.id,
-    x: clamp3(primary.x, 0, maxX),
-    y: clamp3(primary.y, 0, maxY),
+    x: clampedX,
+    y: clampedY,
     width,
     height,
     scale,
+    anchorX: clampedX,
+    anchorY: clampedY,
     primaryAnchoredToLine: primary.lineAnchored
   };
 }
@@ -598,7 +614,8 @@ function stabilizeElementRelations(projectedItems, layouts) {
       const targetCorner = boxCorner(target, relation.targetCorner);
       const expectedX = targetCorner.x - relation.dx * relationScale - sourceOffset.x;
       const expectedY = targetCorner.y - relation.dy * relationScale - sourceOffset.y;
-      const limit = Math.min(28, Math.max(8, Math.min(source.width, source.height) * 0.18));
+      const minSize = Math.min(source.width, source.height);
+      const limit = relation.kind === "near" ? Math.min(72, Math.max(24, minSize * 0.35)) : Math.min(96, Math.max(32, minSize * 0.5));
       const current = corrections.get(source.id) || { x: 0, y: 0, weight: 0 };
       current.x += clamp3(expectedX - source.x, -limit, limit) * relation.weight;
       current.y += clamp3(expectedY - source.y, -limit, limit) * relation.weight;
@@ -611,11 +628,16 @@ function stabilizeElementRelations(projectedItems, layouts) {
     if (!correction) {
       return item;
     }
-    const divisor = Math.max(1, correction.weight);
+    const divisor = Math.max(1e-3, correction.weight);
+    const blend = item.primaryAnchoredToLine ? 0.65 : 0.9;
+    const nextX = item.x + correction.x / divisor * blend;
+    const nextY = item.y + correction.y / divisor * blend;
+    const anchorFenceX = Math.max(36, Math.min(120, item.width * (item.primaryAnchoredToLine ? 0.7 : 1.2)));
+    const anchorFenceY = Math.max(36, Math.min(140, item.height * (item.primaryAnchoredToLine ? 0.8 : 1.5)));
     return {
       ...item,
-      x: item.x + correction.x / divisor,
-      y: item.y + correction.y / divisor
+      x: Number.isFinite(item.anchorX) ? clamp3(nextX, item.anchorX - anchorFenceX, item.anchorX + anchorFenceX) : nextX,
+      y: Number.isFinite(item.anchorY) ? clamp3(nextY, item.anchorY - anchorFenceY, item.anchorY + anchorFenceY) : nextY
     };
   });
 }
@@ -2071,7 +2093,7 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
       on: (eventName, listener) => this.onApiEvent(eventName, listener)
     };
     return {
-      version: "3.1.42",
+      version: "3.1.43",
       apiVersion: v1.apiVersion,
       capabilities,
       v1,
@@ -4798,8 +4820,8 @@ var PreviewDrawingController = class {
     };
     return this.responsiveLayoutContext;
   }
-  captureLineLocation(canvasX, canvasY, context = this.getResponsiveLayoutContext()) {
-    const rendered = captureRenderedLineLocation(context.lineAnchors, canvasX, canvasY);
+  captureLineLocation(canvasX, canvasY, context = this.getResponsiveLayoutContext(), options = {}) {
+    const rendered = captureRenderedLineLocation(context.lineAnchors, canvasX, canvasY, options);
     if (rendered) {
       return rendered;
     }
@@ -4870,7 +4892,7 @@ var PreviewDrawingController = class {
     };
     const cornerLocations = Object.fromEntries(Object.entries(cornerPoints).map(([name, point]) => [
       name,
-      this.captureLineLocation(point.x, point.y, context) || { path: this.file?.path || "", line: null }
+      this.captureLineLocation(point.x, point.y, context, { maxDistance: 112 }) || { path: this.file?.path || "", line: null }
     ]));
     const previous = normalizeElementLayout(stroke.layout);
     stroke.layout = createElementLayout({
@@ -9408,13 +9430,13 @@ function collectRenderedLineAnchors(root, canvas, canvasWindowTop) {
   }
   return anchors;
 }
-function captureRenderedLineLocation(anchors, canvasX, canvasY) {
+function captureRenderedLineLocation(anchors, canvasX, canvasY, { maxDistance = 64 } = {}) {
   const horizontal = anchors.filter((anchor2) => canvasX >= anchor2.left - 28 && canvasX <= anchor2.right + 28);
   const containing = horizontal.filter((anchor2) => canvasY >= anchor2.top && canvasY <= anchor2.bottom);
   const candidates = containing.length ? containing : horizontal.map((anchor2) => ({
     ...anchor2,
     distance: canvasY < anchor2.top ? anchor2.top - canvasY : canvasY > anchor2.bottom ? canvasY - anchor2.bottom : 0
-  })).filter((anchor2) => anchor2.distance <= 64);
+  })).filter((anchor2) => anchor2.distance <= maxDistance);
   const anchor = candidates.sort((a, b) => (a.distance || 0) - (b.distance || 0) || a.area - b.area)[0];
   if (!anchor) {
     return null;
@@ -9469,7 +9491,10 @@ function projectCodeMirrorLineLocation(codeMirror, linePosition) {
     if (!doc?.line || !Number.isFinite(lineNumber)) {
       return NaN;
     }
-    const wantedLine = clamp5(Math.floor(lineNumber) + 1, 1, doc.lines || 1);
+    const wantedLine = Math.floor(lineNumber) + 1;
+    if (wantedLine < 1 || wantedLine > (doc.lines || 1)) {
+      return NaN;
+    }
     const line = doc.line(wantedLine);
     const startRect = codeMirror.coordsAtPos?.(line.from);
     const endRect = codeMirror.coordsAtPos?.(line.to);

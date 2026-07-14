@@ -27,15 +27,15 @@ test("the stable v1 API exposes Cancip-friendly capabilities and events", async 
   assert.match(source, /on: \(eventName, listener\) => this\.onApiEvent\(eventName, listener\)/);
 });
 
-test("3.1.42 projects version-three element frames behind a layout signature", async () => {
+test("3.1.43 projects version-three element frames behind a layout signature", async () => {
   const [source, manifestText] = await Promise.all([
     readFile(sourceUrl, "utf8"),
     readFile(manifestUrl, "utf8")
   ]);
   const manifest = JSON.parse(manifestText);
 
-  assert.equal(manifest.version, "3.1.42");
-  assert.match(source, /version: "3\.1\.42"/);
+  assert.equal(manifest.version, "3.1.43");
+  assert.match(source, /version: "3\.1\.43"/);
   assert.match(source, /if \(!this\.responsivePointsInitialized \|\| signature !== this\.responsiveLayoutSignature\)/);
   assert.match(source, /this\.drawingData\.version = Math\.max\(3/);
   assert.match(source, /captureElementLayoutForStroke/);

@@ -1330,7 +1330,7 @@ var NoteDrawPlugin = class extends Plugin {
       on: (eventName, listener) => this.onApiEvent(eventName, listener)
     };
     return {
-      version: "3.1.42",
+      version: "3.1.43",
       apiVersion: v1.apiVersion,
       capabilities,
       v1,
@@ -4072,8 +4072,8 @@ var PreviewDrawingController = class {
     };
     return this.responsiveLayoutContext;
   }
-  captureLineLocation(canvasX, canvasY, context = this.getResponsiveLayoutContext()) {
-    const rendered = captureRenderedLineLocation(context.lineAnchors, canvasX, canvasY);
+  captureLineLocation(canvasX, canvasY, context = this.getResponsiveLayoutContext(), options = {}) {
+    const rendered = captureRenderedLineLocation(context.lineAnchors, canvasX, canvasY, options);
     if (rendered) {
       return rendered;
     }
@@ -4144,7 +4144,7 @@ var PreviewDrawingController = class {
     };
     const cornerLocations = Object.fromEntries(Object.entries(cornerPoints).map(([name, point]) => [
       name,
-      this.captureLineLocation(point.x, point.y, context) || { path: this.file?.path || "", line: null }
+      this.captureLineLocation(point.x, point.y, context, { maxDistance: 112 }) || { path: this.file?.path || "", line: null }
     ]));
     const previous = normalizeElementLayout(stroke.layout);
     stroke.layout = createElementLayout({
@@ -8689,13 +8689,13 @@ function collectRenderedLineAnchors(root, canvas, canvasWindowTop) {
   }
   return anchors;
 }
-function captureRenderedLineLocation(anchors, canvasX, canvasY) {
+function captureRenderedLineLocation(anchors, canvasX, canvasY, { maxDistance = 64 } = {}) {
   const horizontal = anchors.filter((anchor) => canvasX >= anchor.left - 28 && canvasX <= anchor.right + 28);
   const containing = horizontal.filter((anchor) => canvasY >= anchor.top && canvasY <= anchor.bottom);
   const candidates = containing.length ? containing : horizontal.map((anchor) => ({
     ...anchor,
     distance: canvasY < anchor.top ? anchor.top - canvasY : canvasY > anchor.bottom ? canvasY - anchor.bottom : 0
-  })).filter((anchor) => anchor.distance <= 64);
+  })).filter((anchor) => anchor.distance <= maxDistance);
   const anchor = candidates.sort((a, b) => (a.distance || 0) - (b.distance || 0) || a.area - b.area)[0];
   if (!anchor) {
     return null;
@@ -8750,7 +8750,10 @@ function projectCodeMirrorLineLocation(codeMirror, linePosition) {
     if (!doc?.line || !Number.isFinite(lineNumber)) {
       return NaN;
     }
-    const wantedLine = clamp(Math.floor(lineNumber) + 1, 1, doc.lines || 1);
+    const wantedLine = Math.floor(lineNumber) + 1;
+    if (wantedLine < 1 || wantedLine > (doc.lines || 1)) {
+      return NaN;
+    }
     const line = doc.line(wantedLine);
     const startRect = codeMirror.coordsAtPos?.(line.from);
     const endRect = codeMirror.coordsAtPos?.(line.to);

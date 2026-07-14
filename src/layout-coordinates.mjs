@@ -102,9 +102,12 @@ export function projectResponsivePoint(point, {
   // Versions 3.1.38-3.1.39 serialized a missing line as 0. Reject implausible
   // line-zero jumps while preserving real anchors created near the first line.
   const firstLineIsPlausible = anchor.line === null || anchor.line >= 1 || anchor.y <= 0.15;
+  const lineShiftIsPlausible = anchor.line !== null && anchor.line >= 1
+    ? true
+    : Math.abs(anchoredY - fallbackCanvasY) <= Math.max(96, height * 0.18);
   const canUseLineAnchor = Number.isFinite(anchoredY) &&
     firstLineIsPlausible &&
-    Math.abs(anchoredY - fallbackCanvasY) <= Math.max(96, height * 0.18);
+    lineShiftIsPlausible;
   const canvasY = canUseLineAnchor ? anchoredY : fallbackCanvasY;
   return {
     ...point,
