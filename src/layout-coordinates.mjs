@@ -9,6 +9,14 @@ function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
 
+function normalizeLinePosition(value) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+  const line = Number(value);
+  return Number.isFinite(line) && line >= 0 ? line : null;
+}
+
 export function normalizeContentFrame({ surfaceWidth, contentLeft = 0, contentWidth } = {}) {
   const width = Math.max(1, finite(surfaceWidth, 1));
   const left = clamp(finite(contentLeft, 0), -width, width * 2);
@@ -21,14 +29,13 @@ export function normalizeResponsiveAnchor(anchor) {
   if (!anchor || anchor.basis !== RESPONSIVE_POINT_BASIS) {
     return null;
   }
-  const line = Number(anchor.line);
   return {
     v: 1,
     basis: RESPONSIVE_POINT_BASIS,
     x: clamp(finite(anchor.x, 0), -1, 2),
     y: clamp(finite(anchor.y, 0), 0, 1),
     path: typeof anchor.path === "string" ? anchor.path : "",
-    line: Number.isFinite(line) && line >= 0 ? line : null
+    line: normalizeLinePosition(anchor.line)
   };
 }
 
@@ -51,7 +58,6 @@ export function createResponsivePoint({
   });
   const x = clamp(finite(canvasX, 0) / width, 0, 1);
   const y = clamp(finite(canvasY, 0) / height, 0, 1);
-  const line = Number(linePosition);
   return {
     x,
     y,
@@ -62,7 +68,7 @@ export function createResponsivePoint({
       x: clamp((finite(canvasX, 0) - normalizedFrame.left) / normalizedFrame.width, -1, 2),
       y,
       path: typeof sourcePath === "string" ? sourcePath : "",
-      line: Number.isFinite(line) && line >= 0 ? line : null
+      line: normalizeLinePosition(linePosition)
     }
   };
 }
@@ -92,7 +98,16 @@ export function projectResponsivePoint(point, {
     ? Number(lineToCanvasY(anchor.path, anchor.line))
     : NaN;
   const canvasX = normalizedFrame.left + anchor.x * normalizedFrame.width;
-  const canvasY = Number.isFinite(anchoredY) ? anchoredY : anchor.y * height;
+  const fallbackCanvasY = anchor.y * height;
+  // Versions 3.1.38-3.1.39 serialized a missing line as 0. Reject implausible
+  // line-zero jumps while preserving real anchors created near the first line.
+  const canUseLineAnchor = Number.isFinite(anchoredY) && (
+    anchor.line !== 0 || (
+      anchor.y <= 0.12 &&
+      Math.abs(anchoredY - fallbackCanvasY) <= Math.max(96, height * 0.08)
+    )
+  );
+  const canvasY = canUseLineAnchor ? anchoredY : fallbackCanvasY;
   return {
     ...point,
     x: clamp(canvasX / width, 0, 1),

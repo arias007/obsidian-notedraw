@@ -25,17 +25,19 @@ test("the stable v1 API exposes Cancip-friendly capabilities and events", async 
   assert.match(source, /on: \(eventName, listener\) => this\.onApiEvent\(eventName, listener\)/);
 });
 
-test("3.1.39 keeps responsive reprojection behind a layout signature", async () => {
+test("3.1.40 keeps responsive reprojection behind a layout signature", async () => {
   const [source, manifestText] = await Promise.all([
     readFile(sourceUrl, "utf8"),
     readFile(manifestUrl, "utf8")
   ]);
   const manifest = JSON.parse(manifestText);
 
-  assert.equal(manifest.version, "3.1.39");
-  assert.match(source, /version: "3\.1\.39"/);
+  assert.equal(manifest.version, "3.1.40");
+  assert.match(source, /version: "3\.1\.40"/);
   assert.match(source, /if \(!this\.responsivePointsInitialized \|\| signature !== this\.responsiveLayoutSignature\)/);
   assert.match(source, /this\.drawingData\.version = Math\.max\(2/);
+  assert.match(source, /for \(const controller of this\.liveControllers\) \{\s*controller\.scheduleLayoutRefresh\(\)/);
+  assert.match(source, /generation === this\.layoutRefreshGeneration/);
 });
 
 test("declared minimum Obsidian version uses compatible APIs and CSS", async () => {
@@ -51,4 +53,18 @@ test("declared minimum Obsidian version uses compatible APIs and CSS", async () 
   assert.doesNotMatch(source, /globalThis/);
   assert.match(source, /getAbstractFileByPath/);
   assert.doesNotMatch(styles, /scrollbar-width/);
+});
+
+test("floating text editing keeps one anchor and survives multiline IME input", async () => {
+  const source = await readFile(sourceUrl, "utf8");
+
+  assert.match(source, /const editorDocument = this\.canvas\?\.ownerDocument/);
+  assert.match(source, /editorDocument\.body\.createEl\("textarea"/);
+  assert.match(source, /editorWindow\.visualViewport\?\.addEventListener\("resize", resize\)/);
+  assert.match(source, /isRichTextStroke\(preset\) && Number\(preset\.previewWidth\) > 0/);
+  assert.match(source, /this\.openFloatingTextInput\(stroke\.points\[0\], index\)/);
+  assert.match(source, /textarea\.addEventListener\("compositionstart"/);
+  assert.match(source, /textarea\.addEventListener\("compositionend"/);
+  assert.match(source, /stroke\.textWidth = this\.floatingTextContentWidth/);
+  assert.match(source, /layout\.lines\.forEach/);
 });

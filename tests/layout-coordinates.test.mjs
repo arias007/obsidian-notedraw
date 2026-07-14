@@ -78,3 +78,90 @@ test("malformed anchors are normalized without escaping the supported lane", () 
     line: null
   });
 });
+
+test("missing line anchors remain null instead of becoming line zero", () => {
+  const point = createResponsivePoint({
+    canvasX: 200,
+    canvasY: 600,
+    canvasWidth: 400,
+    canvasHeight: 1000,
+    frame: { left: 20, width: 360 },
+    sourcePath: "Notes/example.md",
+    linePosition: null
+  });
+
+  assert.equal(point.anchor.line, null);
+  assert.equal(normalizeResponsiveAnchor(point.anchor).line, null);
+
+  const projected = projectResponsivePoint(point, {
+    canvasWidth: 400,
+    canvasHeight: 1000,
+    frame: { left: 20, width: 360 },
+    lineToCanvasY: () => 20
+  });
+
+  assert.equal(projected.y, 0.6);
+});
+
+test("legacy false line-zero anchors do not jump from the middle to the top", () => {
+  const projected = projectResponsivePoint({
+    x: 0.5,
+    y: 0.6,
+    anchor: {
+      basis: RESPONSIVE_POINT_BASIS,
+      x: 0.5,
+      y: 0.6,
+      path: "Notes/example.md",
+      line: 0
+    }
+  }, {
+    canvasWidth: 400,
+    canvasHeight: 1000,
+    frame: { left: 20, width: 360 },
+    lineToCanvasY: () => 20
+  });
+
+  assert.equal(projected.y, 0.6);
+});
+
+test("legacy false line-zero anchors stay relative even when a short view makes line zero look nearby", () => {
+  const projected = projectResponsivePoint({
+    x: 0.5,
+    y: 0.18,
+    anchor: {
+      basis: RESPONSIVE_POINT_BASIS,
+      x: 0.5,
+      y: 0.18,
+      path: "Notes/example.md",
+      line: 0
+    }
+  }, {
+    canvasWidth: 400,
+    canvasHeight: 1000,
+    frame: { left: 20, width: 360 },
+    lineToCanvasY: () => 175
+  });
+
+  assert.equal(projected.y, 0.18);
+});
+
+test("real first-line anchors still follow the first rendered line", () => {
+  const projected = projectResponsivePoint({
+    x: 0.5,
+    y: 0.03,
+    anchor: {
+      basis: RESPONSIVE_POINT_BASIS,
+      x: 0.5,
+      y: 0.03,
+      path: "Notes/example.md",
+      line: 0
+    }
+  }, {
+    canvasWidth: 400,
+    canvasHeight: 1000,
+    frame: { left: 20, width: 360 },
+    lineToCanvasY: () => 20
+  });
+
+  assert.equal(projected.y, 0.02);
+});

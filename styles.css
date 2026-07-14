@@ -230,10 +230,11 @@
 }
 
 .notedraw-floating-text-input {
-  position: absolute;
-  z-index: 90;
+  position: fixed;
+  z-index: 1205;
   min-width: 120px;
-  max-width: min(520px, calc(100vw - 48px));
+  max-width: min(520px, calc(100vw - 16px));
+  max-height: calc(100vh - 16px);
   min-height: 32px;
   padding: 3px 5px;
   box-sizing: border-box;

@@ -24,6 +24,10 @@ import {
   normalizeResponsiveAnchor,
   projectResponsivePoint
 } from "./layout-coordinates.mjs";
+import {
+  computeTextLayout,
+  placeFloatingTextEditor
+} from "./text-layout.mjs";
 const activeDocument = window.activeWindow?.document || window.document;
 var PLUGIN_ID = "notedraw";
 var DRAWING_DIR = `${PLUGIN_ID}/drawings`;
@@ -1043,6 +1047,9 @@ var NoteDrawPlugin = class extends Plugin {
       this.syncSourceControllers();
       this.syncMarkdownControllerModes();
       this.syncWebviewControllers();
+      for (const controller of this.liveControllers) {
+        controller.scheduleLayoutRefresh();
+      }
     };
     this.registerEvent(this.app.workspace.on("layout-change", syncSurfaces));
     this.registerEvent(this.app.workspace.on("active-leaf-change", syncSurfaces));
@@ -1243,7 +1250,7 @@ var NoteDrawPlugin = class extends Plugin {
       on: (eventName, listener) => this.onApiEvent(eventName, listener)
     };
     return {
-      version: "3.1.39",
+      version: "3.1.40",
       apiVersion: v1.apiVersion,
       capabilities,
       v1,
@@ -2333,6 +2340,7 @@ var PreviewDrawingController = class {
     this.pendingDomRender = false;
     this.resizeFrameId = null;
     this.positionFrameId = null;
+    this.layoutRefreshGeneration = 0;
     this.markdownAnnotationTimer = null;
     this.markdownRenderObserver = null;
     this.staticCanvas = activeDocument.createElement("canvas");
@@ -2734,6 +2742,7 @@ var PreviewDrawingController = class {
       return;
     }
     this.destroyed = true;
+    this.layoutRefreshGeneration += 1;
     this.endTextEdit();
     this.endFloatingTextInput(false);
     this.clearButtonLongPress();
@@ -2880,6 +2889,7 @@ var PreviewDrawingController = class {
       const canvasChanged = this.resizeCanvas();
       this.updateFloatingControlsPosition();
       this.positionFormatToolbar();
+      this.positionFloatingTextInput();
       if (canvasChanged) {
         this.render();
       }
@@ -2899,6 +2909,7 @@ var PreviewDrawingController = class {
       this.positionFrameId = null;
       this.updateFloatingControlsPosition();
       this.positionFormatToolbar();
+      this.positionFloatingTextInput();
     });
   }
   cancelPositionFrame() {
@@ -2919,14 +2930,20 @@ var PreviewDrawingController = class {
     this.scrollEventTarget?.addEventListener("scroll", this.onScroll, { passive: true });
   }
   scheduleLayoutRefresh() {
-    this.scheduleResize();
-    window.requestAnimationFrame?.(() => this.scheduleResize());
-    window.requestAnimationFrame?.(() => window.requestAnimationFrame?.(() => this.scheduleResize()));
-    window.setTimeout(() => this.scheduleResize(), 80);
-    window.setTimeout(() => this.scheduleResize(), 350);
-    window.setTimeout(() => this.scheduleResize(), 800);
-    window.setTimeout(() => this.scheduleResize(), 1600);
-    window.setTimeout(() => this.scheduleResize(), 2600);
+    const generation = ++this.layoutRefreshGeneration;
+    const refresh = () => {
+      if (!this.destroyed && generation === this.layoutRefreshGeneration) {
+        this.scheduleResize();
+      }
+    };
+    refresh();
+    window.requestAnimationFrame?.(refresh);
+    window.requestAnimationFrame?.(() => window.requestAnimationFrame?.(refresh));
+    window.setTimeout(refresh, 80);
+    window.setTimeout(refresh, 350);
+    window.setTimeout(refresh, 800);
+    window.setTimeout(refresh, 1600);
+    window.setTimeout(refresh, 2600);
   }
   scheduleMarkdownAnnotationRefresh() {
     if (this.markdownAnnotationTimer !== null || this.destroyed) {
@@ -3744,7 +3761,8 @@ var PreviewDrawingController = class {
       this.textButton?.contains(target) ||
       this.selectionMenu?.contains(target) ||
       this.formatToolbar?.contains(target) ||
-      this.currentEditor?.contains(target)
+      this.currentEditor?.contains(target) ||
+      this.floatingTextInput?.element?.contains(target)
     ) {
       return;
     }
@@ -4381,12 +4399,89 @@ var PreviewDrawingController = class {
     );
     return distance <= this.tapDistancePx() * 2;
   }
+  floatingTextPointToClient(point) {
+    const canvasPoint = this.pointToCanvas(point);
+    const canvasRect = this.canvas.getBoundingClientRect();
+    return {
+      x: canvasRect.left + canvasPoint.x,
+      y: canvasRect.top + canvasPoint.y - this.canvasWindowTop
+    };
+  }
+  floatingTextEditorInsets(element) {
+    const view = element?.ownerDocument?.defaultView || window;
+    const style = view.getComputedStyle(element);
+    const number = (property) => Number.parseFloat(style.getPropertyValue(property)) || 0;
+    return {
+      left: number("border-left-width") + number("padding-left"),
+      top: number("border-top-width") + number("padding-top"),
+      horizontal: number("border-left-width") + number("padding-left") + number("padding-right") + number("border-right-width"),
+      vertical: number("border-top-width") + number("padding-top") + number("padding-bottom") + number("border-bottom-width")
+    };
+  }
+  positionFloatingTextInput(state = this.floatingTextInput) {
+    if (!state?.element?.isConnected || !state.point || !this.canvas?.isConnected) {
+      return;
+    }
+    const textarea = state.element;
+    const view = textarea.ownerDocument?.defaultView || window.activeWindow || window;
+    const anchor = this.floatingTextPointToClient(state.point);
+    const rect = textarea.getBoundingClientRect();
+    const canvasRect = this.canvas.getBoundingClientRect();
+    const viewport = view.visualViewport;
+    const viewportLeft = viewport?.offsetLeft || 0;
+    const viewportTop = viewport?.offsetTop || 0;
+    const viewportWidth = viewport?.width || view.innerWidth || 1;
+    const viewportHeight = viewport?.height || view.innerHeight || 1;
+    const viewportRight = viewportLeft + viewportWidth;
+    const viewportBottom = viewportTop + viewportHeight;
+    const anchorVisible = anchor.x >= Math.max(viewportLeft, canvasRect.left) &&
+      anchor.x <= Math.min(viewportRight, canvasRect.right) &&
+      anchor.y >= Math.max(viewportTop, canvasRect.top) &&
+      anchor.y <= Math.min(viewportBottom, canvasRect.bottom);
+    const insets = this.floatingTextEditorInsets(textarea);
+    const placement = placeFloatingTextEditor({
+      anchorX: anchor.x,
+      anchorY: anchor.y,
+      width: rect.width,
+      height: rect.height,
+      viewportWidth,
+      viewportHeight,
+      viewportOffsetLeft: viewportLeft,
+      viewportOffsetTop: viewportTop,
+      contentInsetX: insets.left,
+      contentInsetY: insets.top,
+      margin: 8,
+      anchorVisible
+    });
+    applyElementStyles(textarea, {
+      left: `${Math.round(placement.left)}px`,
+      top: `${Math.round(placement.top)}px`,
+      width: `${Math.round(placement.width)}px`,
+      height: `${Math.round(placement.height)}px`
+    });
+    state.centered = placement.centered;
+    if (state.index < 0) {
+      const placedRect = textarea.getBoundingClientRect();
+      state.commitPoint = this.eventToPoint({
+        clientX: placedRect.left + insets.left,
+        clientY: placedRect.top + insets.top
+      });
+    }
+  }
+  floatingTextContentWidth(element) {
+    const rect = element.getBoundingClientRect();
+    const insets = this.floatingTextEditorInsets(element);
+    return clamp(rect.width - insets.horizontal, 24, 900);
+  }
   openFloatingTextInput(point, index = -1) {
     this.endFloatingTextInput(false);
     this.endTextEdit();
     const existing = index >= 0 ? this.drawingData.strokes[index] : null;
-    const canvasPoint = this.pointToCanvas(point);
-    const textarea = this.previewEl.createEl("textarea", {
+    const brushColor = this.currentBrushSettings().color || this.penColor;
+    const preset = isTextLikeStroke(existing) ? existing : createTextPreset(this.textPreset, " ", brushColor);
+    const editorDocument = this.canvas?.ownerDocument || this.previewEl?.ownerDocument || activeDocument;
+    const editorWindow = editorDocument.defaultView || window.activeWindow || window;
+    const textarea = editorDocument.body.createEl("textarea", {
       cls: "notedraw-floating-text-input",
       attr: {
         rows: "1",
@@ -4395,31 +4490,66 @@ var PreviewDrawingController = class {
     });
     textarea.value = isTextLikeStroke(existing) ? existing.text : "";
     applyElementStyles(textarea, {
-      left: `${Math.round(canvasPoint.x)}px`,
-      top: `${Math.round(canvasPoint.y)}px`,
-      color: isTextLikeStroke(existing) ? existing.color : this.currentBrushSettings().color || this.penColor,
+      color: isTextLikeStroke(existing) ? existing.color : brushColor,
       fontSize: `${isTextLikeStroke(existing) ? clamp(Number(existing.fontSize || 18), 10, 72) : 18}px`,
       fontWeight: isTextLikeStroke(existing) && existing.bold ? "700" : "400",
       fontFamily: isTextLikeStroke(existing) && existing.code ? "monospace" : "sans-serif"
     });
+    const preferredContentWidth = isRichTextStroke(existing)
+      ? existing.previewWidth
+      : Number(existing?.textWidth) > 0
+        ? Number(existing.textWidth)
+        : isRichTextStroke(preset) && Number(preset.previewWidth) > 0
+          ? Number(preset.previewWidth)
+          : null;
     const state = {
       element: textarea,
       point: { ...point, t: Date.now() },
+      commitPoint: null,
+      preferredContentWidth,
       index,
-      committed: false
+      committed: false,
+      cancelled: false,
+      composing: false,
+      commitAfterComposition: false,
+      centered: false
     };
     this.floatingTextInput = state;
     const resize = () => {
-      applyElementStyles(textarea, { height: "auto", width: "auto" });
+      if (!textarea.isConnected) {
+        return;
+      }
+      const viewport = editorWindow.visualViewport;
+      const maxWidth = Math.max(96, Math.min(520, (viewport?.width || editorWindow.innerWidth || 320) - 16));
+      const maxHeight = Math.max(64, (viewport?.height || editorWindow.innerHeight || 480) - 16);
+      const insets = this.floatingTextEditorInsets(textarea);
+      applyElementStyles(textarea, { height: "auto", width: "auto", overflowY: "hidden" });
+      const naturalWidth = textarea.scrollWidth + 2;
+      const preferredWidth = Number(state.preferredContentWidth) > 0 ? Number(state.preferredContentWidth) + insets.horizontal : 0;
+      const width = Math.min(maxWidth, Math.max(120, preferredWidth, naturalWidth));
+      applyElementStyles(textarea, { width: `${Math.round(width)}px`, height: "auto" });
+      const wantedHeight = Math.max(32, textarea.scrollHeight + 2);
       applyElementStyles(textarea, {
-        width: `${Math.min(Math.max(120, textarea.scrollWidth + 12), Math.max(160, this.canvasWidth() - canvasPoint.x - 16))}px`,
-        height: `${Math.max(32, textarea.scrollHeight + 4)}px`
+        height: `${Math.round(Math.min(maxHeight, wantedHeight))}px`,
+        overflowY: wantedHeight > maxHeight ? "auto" : "hidden"
       });
+      this.positionFloatingTextInput(state);
     };
     const commit = () => this.commitFloatingTextInput(state);
     const cancel = () => this.endFloatingTextInput(false, state);
     textarea.addEventListener("input", resize);
-    textarea.addEventListener("blur", commit);
+    textarea.addEventListener("compositionstart", () => {
+      state.composing = true;
+    });
+    textarea.addEventListener("compositionend", () => {
+      state.composing = false;
+      resize();
+      if (state.commitAfterComposition) {
+        state.commitAfterComposition = false;
+        editorWindow.setTimeout(commit, 0);
+      }
+    });
+    textarea.addEventListener("blur", () => editorWindow.setTimeout(commit, 0));
     textarea.addEventListener("keydown", (event) => {
       if (event.key === "Escape") {
         event.preventDefault();
@@ -4429,14 +4559,22 @@ var PreviewDrawingController = class {
         commit();
       }
     });
-    window.requestAnimationFrame(() => {
+    state.reposition = resize;
+    editorWindow.addEventListener("resize", resize);
+    editorWindow.visualViewport?.addEventListener("resize", resize);
+    editorWindow.visualViewport?.addEventListener("scroll", resize);
+    editorWindow.requestAnimationFrame(() => {
       resize();
       textarea.focus();
       textarea.select();
     });
   }
   commitFloatingTextInput(state = this.floatingTextInput) {
-    if (!state || state.committed) {
+    if (!state || state.committed || state.cancelled) {
+      return;
+    }
+    if (state.composing) {
+      state.commitAfterComposition = true;
       return;
     }
     state.committed = true;
@@ -4452,6 +4590,8 @@ var PreviewDrawingController = class {
       if (isRichTextStroke(stroke)) {
         stroke.previewWidth = stroke.previewWidth || 300;
         stroke.previewHeight = stroke.previewHeight || 180;
+      } else {
+        stroke.textWidth = this.floatingTextContentWidth(state.element);
       }
       this.setSelectedStrokes(state.index);
     } else {
@@ -4477,7 +4617,8 @@ var PreviewDrawingController = class {
         buttonStyle: preset.buttonStyle,
         snap: preset.snap,
         locked: false,
-        points: [{ ...state.point, t: Date.now() }]
+        textWidth: normalizeTextRenderMode(preset.render) === TEXT_RENDER_PLAIN ? this.floatingTextContentWidth(state.element) : null,
+        points: [{ ...(state.commitPoint || state.point), t: Date.now() }]
       };
       this.drawingData.strokes.push(stroke);
       this.setSelectedStrokes(this.drawingData.strokes.length - 1);
@@ -4496,18 +4637,27 @@ var PreviewDrawingController = class {
       this.commitFloatingTextInput(state);
       return;
     }
+    if (!commit && !state.committed) {
+      state.cancelled = true;
+    }
+    const view = state.element?.ownerDocument?.defaultView;
+    if (view && state.reposition) {
+      view.removeEventListener("resize", state.reposition);
+      view.visualViewport?.removeEventListener("resize", state.reposition);
+      view.visualViewport?.removeEventListener("scroll", state.reposition);
+    }
     state.element?.remove();
     if (this.floatingTextInput === state) {
       this.floatingTextInput = null;
     }
   }
-  editFloatingTextStroke(index, point = null) {
+  editFloatingTextStroke(index) {
     const stroke = this.drawingData.strokes[index];
     if (!isTextLikeStroke(stroke) || stroke.locked) {
       return;
     }
     this.setSelectedStrokes(index);
-    this.openFloatingTextInput(point || stroke.points[0], index);
+    this.openFloatingTextInput(stroke.points[0], index);
   }
   handleTextToolTap(point) {
     const snappedPoint = this.snapPointForPreset(point, this.textPreset);
@@ -4899,6 +5049,7 @@ var PreviewDrawingController = class {
       {
         width: this.drawingData.strokes[index].width || this.penWidth,
         fontSize: this.drawingData.strokes[index].fontSize || 18,
+        textWidth: Number(this.drawingData.strokes[index].textWidth) > 0 ? Number(this.drawingData.strokes[index].textWidth) : null,
         previewWidth: this.drawingData.strokes[index].previewWidth || 260,
         previewHeight: this.drawingData.strokes[index].previewHeight || 160,
         points: this.drawingData.strokes[index].points.map((strokePoint) => ({ ...strokePoint }))
@@ -4956,6 +5107,7 @@ var PreviewDrawingController = class {
       nextByIndex.set(index, {
         width: clamp((original.width || this.penWidth) * strokeScale, 0.5, 80),
         fontSize: clamp((original.fontSize || 18) * strokeScale, 10, 72),
+        textWidth: Number(original.textWidth) > 0 ? clamp(original.textWidth * Math.abs(scaleX), 24, 900) : null,
         previewWidth: clamp((original.previewWidth || 260) * Math.abs(scaleX), 80, 900),
         previewHeight: clamp((original.previewHeight || 160) * Math.abs(scaleY), 40, 700),
         points: original.points.map((strokePoint) => ({
@@ -4974,6 +5126,7 @@ var PreviewDrawingController = class {
       stroke.width = next.width;
       if (isTextStroke(stroke)) {
         stroke.fontSize = next.fontSize;
+        stroke.textWidth = next.textWidth;
       }
       if (isTextLikeStroke(stroke) || isEmbedStroke(stroke)) {
         stroke.previewWidth = next.previewWidth;
@@ -5008,6 +5161,7 @@ var PreviewDrawingController = class {
           stroke.width = original.width;
           if (isTextStroke(stroke)) {
             stroke.fontSize = original.fontSize;
+            stroke.textWidth = original.textWidth;
           }
           if (isTextLikeStroke(stroke) || isEmbedStroke(stroke)) {
             stroke.previewWidth = original.previewWidth;
@@ -5411,20 +5565,13 @@ var PreviewDrawingController = class {
     const point = this.pointToCanvas(stroke.points[0]);
     const fontSize = clamp(Number(stroke.fontSize || 18), 10, 72);
     const opacity = clamp(Number(stroke.opacity ?? 1), 0, 1);
-    const uiArrow = stroke.uiRole === "arrow";
-    const uiButton = isButtonLikeStroke(stroke);
-    const padded = !uiArrow && (stroke.boxed || stroke.code || stroke.file || uiButton);
-    const paddingX = padded ? Math.max(8, fontSize * 0.45) : 0;
-    const paddingY = padded ? Math.max(4, fontSize * 0.26) : 0;
     ctx.save();
     ctx.globalAlpha = alpha * opacity;
     ctx.font = `${stroke.bold ? "700 " : ""}${fontSize}px ${stroke.code ? "monospace" : "sans-serif"}`;
     ctx.textBaseline = "top";
     ctx.fillStyle = stroke.color || this.penColor;
-    if (paddingX || paddingY) {
-      const metrics = ctx.measureText(text);
-      const width = Math.max(fontSize, metrics.width);
-      const height = fontSize * 1.28;
+    const layout = getTextStrokeLayout(stroke, this.canvasWidth(), (value) => ctx.measureText(value).width);
+    if (layout.paddingX || layout.paddingY) {
       const style = normalizeButtonStyle(stroke.buttonStyle);
       if (style === "solid") {
         ctx.fillStyle = stroke.color || this.penColor;
@@ -5435,13 +5582,15 @@ var PreviewDrawingController = class {
       }
       ctx.strokeStyle = stroke.color || this.penColor;
       ctx.lineWidth = 1.25;
-      const radius = style === "pill" ? Math.min(999, (height + paddingY * 2) / 2) : 6;
-      roundRect(ctx, point.x - paddingX, point.y - paddingY, width + paddingX * 2, height + paddingY * 2, radius);
+      const radius = style === "pill" ? Math.min(999, layout.height / 2) : 6;
+      roundRect(ctx, point.x - layout.paddingX, point.y - layout.paddingY, layout.width, layout.height, radius);
       ctx.fill();
       ctx.stroke();
     }
     ctx.fillStyle = normalizeButtonStyle(stroke.buttonStyle) === "solid" ? "#ffffff" : stroke.color || this.penColor;
-    ctx.fillText(text, point.x, point.y);
+    layout.lines.forEach((line, index) => {
+      ctx.fillText(line, point.x, point.y + index * layout.lineHeight);
+    });
     ctx.restore();
   }
   drawWatercolorStroke(stroke, alpha = 1) {
@@ -7523,6 +7672,7 @@ function normalizeStroke(stroke) {
     exportImageDataUrl: normalizeImageDataUrl(stroke?.exportImageDataUrl),
     previewWidth: Number.isFinite(Number(stroke?.previewWidth)) ? clamp(Number(stroke.previewWidth), 80, 900) : 260,
     previewHeight: Number.isFinite(Number(stroke?.previewHeight)) ? clamp(Number(stroke.previewHeight), 40, 700) : 160,
+    textWidth: Number.isFinite(Number(stroke?.textWidth)) && Number(stroke.textWidth) > 0 ? clamp(Number(stroke.textWidth), 24, 900) : null,
     fontSize: Number.isFinite(Number(stroke?.fontSize)) ? clamp(Number(stroke.fontSize), 10, 72) : 18,
     bold: Boolean(stroke?.bold),
     code: Boolean(stroke?.code),
@@ -8362,6 +8512,22 @@ function pointDistanceOnCanvas(a, b, width, height) {
     ((a?.y || 0) - (b?.y || 0)) * Math.max(1, height || 1)
   );
 }
+function getTextStrokeLayout(stroke, width, measureText = null) {
+  const point = stroke?.points?.[0] || { x: 0, y: 0 };
+  const fontSize = clamp(Number(stroke?.fontSize || 18), 10, 72);
+  const uiArrow = stroke?.uiRole === "arrow";
+  const padded = !uiArrow && (stroke?.boxed || stroke?.code || stroke?.file || isButtonLikeStroke(stroke));
+  const canvasX = clamp(Number(point.x || 0), 0, 1) * Math.max(1, Number(width) || 1);
+  const maxWidth = Math.max(fontSize, Math.max(1, Number(width) || 1) - canvasX - Math.max(8, fontSize * 0.45) - 8);
+  return computeTextLayout({
+    text: String(stroke?.text || "").trim(),
+    fontSize,
+    textWidth: stroke?.textWidth,
+    maxWidth,
+    padded,
+    measureText
+  });
+}
 function getStrokeBounds(stroke, width, height) {
   if (!stroke?.points?.length) {
     return null;
@@ -8381,19 +8547,14 @@ function getStrokeBounds(stroke, width, height) {
   }
   if (isTextStroke(stroke)) {
     const point = stroke.points[0];
-    const fontSize = clamp(Number(stroke.fontSize || 18), 10, 72);
-    const textWidth = Math.max(fontSize, String(stroke.text || "").length * fontSize * 0.62);
-    const uiArrow = stroke.uiRole === "arrow";
-    const padded = !uiArrow && (stroke.boxed || stroke.code || stroke.file || isButtonLikeStroke(stroke));
-    const paddingX = padded ? Math.max(8, fontSize * 0.45) : 0;
-    const paddingY = padded ? Math.max(4, fontSize * 0.26) : 0;
+    const layout = getTextStrokeLayout(stroke, width);
     const x = point.x * width;
     const y = point.y * height;
     return {
-      minX: x - paddingX,
-      minY: y - paddingY,
-      maxX: x + textWidth + paddingX,
-      maxY: y + fontSize * 1.28 + paddingY
+      minX: x - layout.paddingX,
+      minY: y - layout.paddingY,
+      maxX: x + layout.contentWidth + layout.paddingX,
+      maxY: y + layout.contentHeight + layout.paddingY
     };
   }
   let minX = Infinity;
