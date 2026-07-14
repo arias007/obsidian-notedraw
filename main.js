@@ -228,7 +228,8 @@ function projectResponsivePoint(point, {
   const anchoredY = anchor.line !== null && typeof lineToCanvasY === "function" ? Number(lineToCanvasY(anchor.path, anchor.line)) : NaN;
   const canvasX = normalizedFrame.left + anchor.x * normalizedFrame.width;
   const fallbackCanvasY = anchor.y * height;
-  const canUseLineAnchor = Number.isFinite(anchoredY) && (anchor.line !== 0 || anchor.y <= 0.12 && Math.abs(anchoredY - fallbackCanvasY) <= Math.max(96, height * 0.08));
+  const firstLineIsPlausible = anchor.line === null || anchor.line >= 1 || anchor.y <= 0.15;
+  const canUseLineAnchor = Number.isFinite(anchoredY) && firstLineIsPlausible && Math.abs(anchoredY - fallbackCanvasY) <= Math.max(96, height * 0.18);
   const canvasY = canUseLineAnchor ? anchoredY : fallbackCanvasY;
   return {
     ...point,
@@ -400,7 +401,9 @@ function projectCorner(corner, target, lineToCanvasY) {
   const frame = normalizeFrame(target);
   const fallbackY = corner.y * frame.documentHeight;
   const lineY = corner.line !== null && typeof lineToCanvasY === "function" ? Number(lineToCanvasY(corner.path, corner.line)) : NaN;
-  const canUseLine = Number.isFinite(lineY) && (corner.line !== 0 || corner.y <= 0.12 && Math.abs(lineY - fallbackY) <= Math.max(96, frame.documentHeight * 0.08));
+  const firstLineIsPlausible = corner.line === null || corner.line >= 1 || corner.y <= 0.15;
+  const maxLineShift = Math.max(96, Math.min(frame.documentHeight * 0.18, frame.viewportHeight * 0.45));
+  const canUseLine = Number.isFinite(lineY) && firstLineIsPlausible && Math.abs(lineY - fallbackY) <= maxLineShift;
   return {
     x: frame.contentLeft + corner.x * frame.contentWidth,
     y: canUseLine ? lineY : fallbackY,
@@ -2068,7 +2071,7 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
       on: (eventName, listener) => this.onApiEvent(eventName, listener)
     };
     return {
-      version: "3.1.41",
+      version: "3.1.42",
       apiVersion: v1.apiVersion,
       capabilities,
       v1,
@@ -3699,7 +3702,11 @@ var PreviewDrawingController = class {
     if (this.destroyed) {
       return;
     }
-    this.plugin.setControllerActivation(this, !this.active);
+    const nextActive = !this.active;
+    if (nextActive && !this.drawingsVisible) {
+      this.setDrawingsVisible(true);
+    }
+    this.plugin.setControllerActivation(this, nextActive);
   }
   applyActiveState(active) {
     if (this.destroyed) {
@@ -4765,7 +4772,10 @@ var PreviewDrawingController = class {
     }
   }
   toggleDrawingsVisible() {
-    this.drawingsVisible = !this.drawingsVisible;
+    this.setDrawingsVisible(!this.drawingsVisible);
+  }
+  setDrawingsVisible(visible) {
+    this.drawingsVisible = Boolean(visible);
     this.previewEl.toggleClass("is-drawing-hidden", !this.drawingsVisible);
     this.plugin.setAccessibleLabel(
       this.button,
@@ -4916,6 +4926,11 @@ var PreviewDrawingController = class {
   initializeAndProjectResponsivePoints(context, signature) {
     let migrated = false;
     const elementIds = /* @__PURE__ */ new Set();
+    if (needsElementLayoutMigration(this.drawingData?.strokes) && !isStableResponsiveCaptureFrame(this.canvasWidth(), context.frame)) {
+      this.responsivePointsInitialized = false;
+      this.responsiveLayoutSignature = "";
+      return;
+    }
     for (const [index, stroke] of (this.drawingData?.strokes || []).entries()) {
       const existingLayout = normalizeElementLayout(stroke.layout);
       const hasUniqueElementLayout = Boolean(existingLayout?.id) && !elementIds.has(existingLayout.id);
@@ -9339,6 +9354,22 @@ function measureResponsiveViewportHeight(previewEl, scrollContainer) {
 function createElementLayoutId(index = -1) {
   return `el-${Date.now().toString(36)}-${Math.max(0, Number(index) || 0).toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
 }
+function needsElementLayoutMigration(strokes) {
+  const ids = /* @__PURE__ */ new Set();
+  return (Array.isArray(strokes) ? strokes : []).some((stroke) => {
+    const id = normalizeElementLayout(stroke?.layout)?.id;
+    if (!id || ids.has(id)) {
+      return true;
+    }
+    ids.add(id);
+    return false;
+  });
+}
+function isStableResponsiveCaptureFrame(surfaceWidth, frame) {
+  const width = Number(surfaceWidth) || 0;
+  const contentWidth = Number(frame?.width) || 0;
+  return width >= 180 && contentWidth >= 140 && contentWidth / width >= 0.42;
+}
 function responsiveLayoutSignature(width, height, frame, surfaceType, viewportHeight) {
   return [
     surfaceType,
@@ -9383,7 +9414,7 @@ function captureRenderedLineLocation(anchors, canvasX, canvasY) {
   const candidates = containing.length ? containing : horizontal.map((anchor2) => ({
     ...anchor2,
     distance: canvasY < anchor2.top ? anchor2.top - canvasY : canvasY > anchor2.bottom ? canvasY - anchor2.bottom : 0
-  })).filter((anchor2) => anchor2.distance <= 160);
+  })).filter((anchor2) => anchor2.distance <= 64);
   const anchor = candidates.sort((a, b) => (a.distance || 0) - (b.distance || 0) || a.area - b.area)[0];
   if (!anchor) {
     return null;

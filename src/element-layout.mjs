@@ -176,9 +176,9 @@ function projectCorner(corner, target, lineToCanvasY) {
   const lineY = corner.line !== null && typeof lineToCanvasY === "function"
     ? Number(lineToCanvasY(corner.path, corner.line))
     : NaN;
-  const canUseLine = Number.isFinite(lineY) && (
-    corner.line !== 0 || (corner.y <= 0.12 && Math.abs(lineY - fallbackY) <= Math.max(96, frame.documentHeight * 0.08))
-  );
+  const firstLineIsPlausible = corner.line === null || corner.line >= 1 || corner.y <= 0.15;
+  const maxLineShift = Math.max(96, Math.min(frame.documentHeight * 0.18, frame.viewportHeight * 0.45));
+  const canUseLine = Number.isFinite(lineY) && firstLineIsPlausible && Math.abs(lineY - fallbackY) <= maxLineShift;
   return {
     x: frame.contentLeft + corner.x * frame.contentWidth,
     y: canUseLine ? lineY : fallbackY,

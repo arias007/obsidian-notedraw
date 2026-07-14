@@ -1330,7 +1330,7 @@ var NoteDrawPlugin = class extends Plugin {
       on: (eventName, listener) => this.onApiEvent(eventName, listener)
     };
     return {
-      version: "3.1.41",
+      version: "3.1.42",
       apiVersion: v1.apiVersion,
       capabilities,
       v1,
@@ -2967,7 +2967,11 @@ var PreviewDrawingController = class {
     if (this.destroyed) {
       return;
     }
-    this.plugin.setControllerActivation(this, !this.active);
+    const nextActive = !this.active;
+    if (nextActive && !this.drawingsVisible) {
+      this.setDrawingsVisible(true);
+    }
+    this.plugin.setControllerActivation(this, nextActive);
   }
   applyActiveState(active) {
     if (this.destroyed) {
@@ -4042,7 +4046,10 @@ var PreviewDrawingController = class {
     }
   }
   toggleDrawingsVisible() {
-    this.drawingsVisible = !this.drawingsVisible;
+    this.setDrawingsVisible(!this.drawingsVisible);
+  }
+  setDrawingsVisible(visible) {
+    this.drawingsVisible = Boolean(visible);
     this.previewEl.toggleClass("is-drawing-hidden", !this.drawingsVisible);
     this.plugin.setAccessibleLabel(
       this.button,
@@ -4193,6 +4200,11 @@ var PreviewDrawingController = class {
   initializeAndProjectResponsivePoints(context, signature) {
     let migrated = false;
     const elementIds = new Set();
+    if (needsElementLayoutMigration(this.drawingData?.strokes) && !isStableResponsiveCaptureFrame(this.canvasWidth(), context.frame)) {
+      this.responsivePointsInitialized = false;
+      this.responsiveLayoutSignature = "";
+      return;
+    }
     for (const [index, stroke] of (this.drawingData?.strokes || []).entries()) {
       const existingLayout = normalizeElementLayout(stroke.layout);
       const hasUniqueElementLayout = Boolean(existingLayout?.id) && !elementIds.has(existingLayout.id);
@@ -8623,6 +8635,22 @@ function measureResponsiveViewportHeight(previewEl, scrollContainer) {
 function createElementLayoutId(index = -1) {
   return `el-${Date.now().toString(36)}-${Math.max(0, Number(index) || 0).toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
 }
+function needsElementLayoutMigration(strokes) {
+  const ids = new Set();
+  return (Array.isArray(strokes) ? strokes : []).some((stroke) => {
+    const id = normalizeElementLayout(stroke?.layout)?.id;
+    if (!id || ids.has(id)) {
+      return true;
+    }
+    ids.add(id);
+    return false;
+  });
+}
+function isStableResponsiveCaptureFrame(surfaceWidth, frame) {
+  const width = Number(surfaceWidth) || 0;
+  const contentWidth = Number(frame?.width) || 0;
+  return width >= 180 && contentWidth >= 140 && contentWidth / width >= 0.42;
+}
 function responsiveLayoutSignature(width, height, frame, surfaceType, viewportHeight) {
   return [
     surfaceType,
@@ -8667,7 +8695,7 @@ function captureRenderedLineLocation(anchors, canvasX, canvasY) {
   const candidates = containing.length ? containing : horizontal.map((anchor) => ({
     ...anchor,
     distance: canvasY < anchor.top ? anchor.top - canvasY : canvasY > anchor.bottom ? canvasY - anchor.bottom : 0
-  })).filter((anchor) => anchor.distance <= 160);
+  })).filter((anchor) => anchor.distance <= 64);
   const anchor = candidates.sort((a, b) => (a.distance || 0) - (b.distance || 0) || a.area - b.area)[0];
   if (!anchor) {
     return null;

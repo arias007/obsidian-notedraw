@@ -182,3 +182,29 @@ test("reciprocal relation cycles reduce drift without diverging", () => {
   assert.ok(afterError < beforeError);
   assert.equal(normalizeElementLayout({ basis: "legacy" }), null);
 });
+
+test("implausible first-line anchors fall back to document-relative height", () => {
+  const layout = createElementLayout({
+    id: "legacy-false-line",
+    bounds: { minX: 120, minY: 300, maxX: 240, maxY: 380 },
+    canvasWidth: 500,
+    canvasHeight: 1200,
+    viewportHeight: 800,
+    frame: { left: 40, width: 420 },
+    sourcePath: "Notes/example.md",
+    cornerLocations: {
+      topLeft: { path: "Notes/example.md", line: 0.999999 },
+      topRight: { path: "Notes/example.md", line: 0.999999 }
+    }
+  });
+  const projected = projectElementLayout(layout, {
+    canvasWidth: 500,
+    canvasHeight: 3000,
+    viewportHeight: 850,
+    frame: { left: 40, width: 420 },
+    lineToCanvasY: () => 1700
+  });
+
+  assert.equal(projected.y, 750);
+  assert.equal(projected.primaryAnchoredToLine, false);
+});

@@ -165,3 +165,24 @@ test("real first-line anchors still follow the first rendered line", () => {
 
   assert.equal(projected.y, 0.02);
 });
+
+test("legacy fractional first-line anchors cannot pull middle-page elements together", () => {
+  const projected = projectResponsivePoint({
+    x: 0.5,
+    y: 0.45,
+    anchor: {
+      basis: RESPONSIVE_POINT_BASIS,
+      x: 0.5,
+      y: 0.45,
+      path: "Notes/example.md",
+      line: 0.999999
+    }
+  }, {
+    canvasWidth: 400,
+    canvasHeight: 3000,
+    frame: { left: 20, width: 360 },
+    lineToCanvasY: () => 1700
+  });
+
+  assert.equal(projected.y, 0.45);
+});

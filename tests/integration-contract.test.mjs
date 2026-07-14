@@ -27,15 +27,15 @@ test("the stable v1 API exposes Cancip-friendly capabilities and events", async 
   assert.match(source, /on: \(eventName, listener\) => this\.onApiEvent\(eventName, listener\)/);
 });
 
-test("3.1.41 projects version-three element frames behind a layout signature", async () => {
+test("3.1.42 projects version-three element frames behind a layout signature", async () => {
   const [source, manifestText] = await Promise.all([
     readFile(sourceUrl, "utf8"),
     readFile(manifestUrl, "utf8")
   ]);
   const manifest = JSON.parse(manifestText);
 
-  assert.equal(manifest.version, "3.1.41");
-  assert.match(source, /version: "3\.1\.41"/);
+  assert.equal(manifest.version, "3.1.42");
+  assert.match(source, /version: "3\.1\.42"/);
   assert.match(source, /if \(!this\.responsivePointsInitialized \|\| signature !== this\.responsiveLayoutSignature\)/);
   assert.match(source, /this\.drawingData\.version = Math\.max\(3/);
   assert.match(source, /captureElementLayoutForStroke/);
@@ -51,7 +51,7 @@ test("reading and source controllers share the latest in-memory drawing state", 
   assert.match(source, /const cached = this\.drawingStateCache\.get\(path\);\s*if \(cached\) \{\s*return normalizeDrawingData\(cached, file\)/);
   assert.match(source, /const canonical = normalizeDrawingData\(data, file\);\s*this\.drawingStateCache\.set\(path, canonical\);\s*this\.pendingDrawingSaves\.set\(path, file\);\s*this\.refreshControllersForFile\(file, canonical, \{ excludeData: data \}\)/);
   assert.match(source, /writeDrawings\(file, compacted, \{ refresh: false, updateCache: false \}\)/);
-  assert.match(source, /this\.plugin\.setControllerActivation\(this, !this\.active\)/);
+  assert.match(source, /this\.plugin\.setControllerActivation\(this, nextActive\)/);
   assert.match(source, /this\.textPanel = createNoteDrawControlElement\(this\.floatingControlsHost, "notedraw-text-panel"\)/);
   assert.doesNotMatch(source, /if \(this\.surfaceType !== "source"\) \{\s*this\.textButton/);
 });

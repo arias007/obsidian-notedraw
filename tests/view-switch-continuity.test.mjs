@@ -11,7 +11,7 @@ test("magic wand state follows the stable leaf across Markdown surfaces", async 
   assert.match(source, /this\.viewDrawingActive\s*=\s*\/\* @__PURE__ \*\/ new WeakMap\(\)/);
   assert.match(source, /this\.viewToolbarState\s*=\s*\/\* @__PURE__ \*\/ new WeakMap\(\)/);
   assert.match(source, /controllerStateKey\(controller\)\s*\{\s*const view = controller\?\.view;\s*return view\?\.leaf \|\| findOwningLeaf\(this\.app, view\?\.containerEl \|\| controller\?\.previewEl\) \|\| view \|\| controller\?\.previewEl/s);
-  assert.match(source, /this\.plugin\.setControllerActivation\(this, !this\.active\)/);
+  assert.match(source, /this\.plugin\.setControllerActivation\(this, nextActive\)/);
   assert.match(source, /candidate\.applySharedToolbarState\(next\)/);
   assert.doesNotMatch(source, /Failed to close source NoteDraw controller/);
 });
@@ -39,4 +39,19 @@ test("toolbar mode, brush, visibility, panels, and text preset are shared", asyn
   assert.match(source, /applySharedToolbarState\(state\)/);
   assert.match(source, /this\.toolMode = state\.toolMode \|\| this\.toolMode/);
   assert.doesNotMatch(source, /this\.surfaceType === "source"\) \{\s*return false;/);
+});
+
+test("magic wand short press restores drawings while long press only toggles visibility", async () => {
+  const source = await readFile(sourceUrl, "utf8");
+
+  assert.match(source, /const nextActive = !this\.active;\s*if \(nextActive && !this\.drawingsVisible\) \{\s*this\.setDrawingsVisible\(true\)/);
+  assert.match(source, /this\.buttonLongPressed = true;\s*this\.toggleDrawingsVisible\(\)/);
+  assert.match(source, /toggleDrawingsVisible\(\) \{\s*this\.setDrawingsVisible\(!this\.drawingsVisible\)/);
+});
+
+test("element migration waits for a stable note lane instead of transition geometry", async () => {
+  const source = await readFile(sourceUrl, "utf8");
+
+  assert.match(source, /needsElementLayoutMigration\(this\.drawingData\?\.strokes\) && !isStableResponsiveCaptureFrame/);
+  assert.match(source, /width >= 180 && contentWidth >= 140 && contentWidth \/ width >= 0\.42/);
 });
