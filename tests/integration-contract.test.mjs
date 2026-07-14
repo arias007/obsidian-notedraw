@@ -25,15 +25,30 @@ test("the stable v1 API exposes Cancip-friendly capabilities and events", async 
   assert.match(source, /on: \(eventName, listener\) => this\.onApiEvent\(eventName, listener\)/);
 });
 
-test("3.1.38 keeps responsive reprojection behind a layout signature", async () => {
+test("3.1.39 keeps responsive reprojection behind a layout signature", async () => {
   const [source, manifestText] = await Promise.all([
     readFile(sourceUrl, "utf8"),
     readFile(manifestUrl, "utf8")
   ]);
   const manifest = JSON.parse(manifestText);
 
-  assert.equal(manifest.version, "3.1.38");
-  assert.match(source, /version: "3\.1\.38"/);
+  assert.equal(manifest.version, "3.1.39");
+  assert.match(source, /version: "3\.1\.39"/);
   assert.match(source, /if \(!this\.responsivePointsInitialized \|\| signature !== this\.responsiveLayoutSignature\)/);
   assert.match(source, /this\.drawingData\.version = Math\.max\(2/);
+});
+
+test("declared minimum Obsidian version uses compatible APIs and CSS", async () => {
+  const [source, styles, manifestText] = await Promise.all([
+    readFile(sourceUrl, "utf8"),
+    readFile(new URL("../styles.css", import.meta.url), "utf8"),
+    readFile(manifestUrl, "utf8")
+  ]);
+  const manifest = JSON.parse(manifestText);
+
+  assert.equal(manifest.minAppVersion, "1.5.0");
+  assert.doesNotMatch(source, /getFileByPath/);
+  assert.doesNotMatch(source, /globalThis/);
+  assert.match(source, /getAbstractFileByPath/);
+  assert.doesNotMatch(styles, /scrollbar-width/);
 });

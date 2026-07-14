@@ -232,7 +232,7 @@ function projectResponsivePoint(point, {
 }
 
 // src/notedraw-plugin.js
-var activeDocument = globalThis[["doc", "ument"].join("")];
+var activeDocument = window.activeWindow?.document || window.document;
 var PLUGIN_ID = "notedraw";
 var DRAWING_DIR = `${PLUGIN_ID}/drawings`;
 var ASSET_DIR = `${PLUGIN_ID}/assets`;
@@ -1451,7 +1451,7 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
       on: (eventName, listener) => this.onApiEvent(eventName, listener)
     };
     return {
-      version: "3.1.38",
+      version: "3.1.39",
       apiVersion: v1.apiVersion,
       capabilities,
       v1,
@@ -1467,13 +1467,13 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
   }
   resolveApiFile(fileOrPath, sourcePath = "") {
     if (fileOrPath && typeof fileOrPath === "object" && typeof fileOrPath.path === "string") {
-      return this.app.vault.getFileByPath?.((0, import_obsidian.normalizePath)(fileOrPath.path)) || fileOrPath;
+      return getVaultFileByPath(this.app.vault, fileOrPath.path) || fileOrPath;
     }
     const path = normalizeVaultPath(fileOrPath);
     if (!path) {
       return null;
     }
-    return this.app.vault.getFileByPath?.((0, import_obsidian.normalizePath)(path)) || this.app.metadataCache.getFirstLinkpathDest?.(path, sourcePath || "") || null;
+    return getVaultFileByPath(this.app.vault, path) || this.app.metadataCache.getFirstLinkpathDest?.(path, sourcePath || "") || null;
   }
   describeController(controller) {
     if (!controller || controller.destroyed) {
@@ -5490,7 +5490,7 @@ var PreviewDrawingController = class {
   async resolveNotePreviewContent(text) {
     const link = String(text || "").trim();
     const normalized = unwrapWikiLink(link);
-    const file = this.plugin.app.metadataCache.getFirstLinkpathDest(normalized, this.file.path) || this.plugin.app.vault.getFileByPath((0, import_obsidian.normalizePath)(normalized));
+    const file = this.plugin.app.metadataCache.getFirstLinkpathDest(normalized, this.file.path) || getVaultFileByPath(this.plugin.app.vault, normalized);
     if (!file) {
       return `> ${link || "Note not found"}`;
     }
@@ -7063,7 +7063,7 @@ function resolveRenderedSourcePath(app, root, fallbackPath) {
   if (!link) {
     return normalizeVaultPath(fallbackPath);
   }
-  const file = app.metadataCache.getFirstLinkpathDest?.(link, fallbackPath || "") || app.vault.getFileByPath?.((0, import_obsidian.normalizePath)(link));
+  const file = app.metadataCache.getFirstLinkpathDest?.(link, fallbackPath || "") || getVaultFileByPath(app.vault, link);
   return normalizeVaultPath(file?.path || fallbackPath);
 }
 function annotateVisibleMarkdownElements(app, root, fallbackPath) {
@@ -7518,6 +7518,14 @@ function isWebviewRelatedNode(node) {
     return false;
   }
   return node.matches?.(".mwv-embed, webview, iframe, .workspace-leaf-content[data-type*='webview'], .workspace-leaf-content[data-type*='web-view'], .workspace-leaf-content[data-type*='browser'], .workspace-leaf-content[data-type*='iframe']") || Boolean(node.querySelector?.(".mwv-embed, webview, iframe, .workspace-leaf-content[data-type*='webview'], .workspace-leaf-content[data-type*='web-view'], .workspace-leaf-content[data-type*='browser'], .workspace-leaf-content[data-type*='iframe']"));
+}
+function getVaultFileByPath(vault, path) {
+  const normalized = normalizeVaultPath(path);
+  if (!vault || !normalized) {
+    return null;
+  }
+  const file = vault.getAbstractFileByPath((0, import_obsidian.normalizePath)(normalized));
+  return file && typeof file.extension === "string" ? file : null;
 }
 function normalizeVaultPath(path) {
   return String(path || "").replace(/\\/g, "/").replace(/^\/+/, "").replace(/\/+$/, "");
