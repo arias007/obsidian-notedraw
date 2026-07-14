@@ -244,6 +244,41 @@ test("same-width view changes do not let different Markdown line heights shrink 
   assert.ok(projected.height >= 96);
 });
 
+test("desktop reading and editing heights do not shift an unanchored element as a whole", () => {
+  const layout = createElementLayout({
+    id: "desktop-view-parity",
+    bounds: { minX: 100, minY: 700, maxX: 220, maxY: 800 },
+    canvasWidth: 500,
+    canvasHeight: 2000,
+    viewportHeight: 800,
+    frame: { left: 40, width: 420 }
+  });
+  const editing = projectElementLayout(layout, {
+    canvasWidth: 500,
+    canvasHeight: 1800,
+    viewportHeight: 800,
+    frame: { left: 40, width: 420 },
+    preferDocumentFlow: false
+  });
+  const reading = projectElementLayout(layout, {
+    canvasWidth: 500,
+    canvasHeight: 3000,
+    viewportHeight: 800,
+    frame: { left: 40, width: 420 },
+    preferDocumentFlow: false
+  });
+  const mobile = projectElementLayout(layout, {
+    canvasWidth: 360,
+    canvasHeight: 3600,
+    viewportHeight: 800,
+    frame: { left: 20, width: 320 },
+    preferDocumentFlow: true
+  });
+
+  assert.ok(Math.abs(reading.y - editing.y) < 16, "desktop mode differences stay nearly neutral");
+  assert.ok(mobile.y > reading.y * 1.35, "mobile still follows the taller reflowed document");
+});
+
 test("reciprocal relation cycles reduce drift without diverging", () => {
   const first = makeLayout("first-cycle", 100, 100, 140, 120);
   const second = makeLayout("second-cycle", 180, 150, 120, 110);
@@ -398,4 +433,18 @@ test("large elements with all corners clamped to the same legacy line are repair
   });
 
   assert.equal(elementLayoutNeedsRepair(layout), true);
+});
+
+test("a capped Markdown lane remains stable on an ultra-wide desktop surface", () => {
+  const layout = createElementLayout({
+    id: "ultra-wide-lane",
+    bounds: { minX: 80, minY: 220, maxX: 280, maxY: 340 },
+    canvasWidth: 2560,
+    canvasHeight: 2200,
+    viewportHeight: 900,
+    frame: { left: 40, width: 860 },
+    sourcePath: "Notes/example.md"
+  });
+
+  assert.equal(elementLayoutNeedsRepair(layout), false);
 });

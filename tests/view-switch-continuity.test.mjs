@@ -53,5 +53,6 @@ test("element migration waits for a stable note lane instead of transition geome
   const source = await readFile(sourceUrl, "utf8");
 
   assert.match(source, /needsElementLayoutMigration\(this\.drawingData\?\.strokes\) && !isStableResponsiveCaptureFrame/);
-  assert.match(source, /width >= 180 && contentWidth >= 140 && contentWidth \/ width >= 0\.42/);
+  assert.match(source, /const stableWideLane = width >= 900 && contentWidth >= 720/);
+  assert.match(source, /contentWidth \/ width >= 0\.42 \|\| stableWideLane/);
 });

@@ -19,6 +19,7 @@ import {
 } from "./canvas-sizing.mjs";
 import {
   RESPONSIVE_POINT_BASIS,
+  constrainWideContentFrame,
   createResponsivePoint,
   normalizeContentFrame,
   normalizeResponsiveAnchor,
@@ -1335,7 +1336,7 @@ var NoteDrawPlugin = class extends Plugin {
       on: (eventName, listener) => this.onApiEvent(eventName, listener)
     };
     return {
-      version: "3.1.47",
+      version: "3.1.48",
       apiVersion: v1.apiVersion,
       capabilities,
       v1,
@@ -2818,6 +2819,7 @@ var PreviewDrawingController = class {
       return;
     }
     this.endTextEdit();
+    this.endFloatingTextInput(true);
     this.cancelRenderFrame();
     this.cancelResizeFrame();
     this.resetCanvasSurface();
@@ -2891,10 +2893,10 @@ var PreviewDrawingController = class {
     if (this.destroyed) {
       return;
     }
+    this.endTextEdit();
+    this.endFloatingTextInput(true);
     this.destroyed = true;
     this.layoutRefreshGeneration += 1;
-    this.endTextEdit();
-    this.endFloatingTextInput(false);
     this.clearButtonLongPress();
     this.cancelRenderFrame();
     this.cancelResizeFrame();
@@ -2992,7 +2994,7 @@ var PreviewDrawingController = class {
     this.button?.classList.toggle("is-active", this.active);
     if (!this.active && wasActive) {
       this.endTextEdit();
-      this.endFloatingTextInput(false);
+      this.endFloatingTextInput(true);
       this.setPaletteOpen(false);
       this.setTextPanelOpen(false);
       this.hideSelectionMenu();
@@ -3244,7 +3246,7 @@ var PreviewDrawingController = class {
     this.clearSelectedStrokes();
     this.setPaletteOpen(false);
     this.setTextPanelOpen(false);
-    this.endFloatingTextInput(false);
+    this.endFloatingTextInput(true);
     this.endTextEdit();
     this.cancelCurrentStroke();
     this.cancelSelectionDrag(true);
@@ -4297,7 +4299,8 @@ var PreviewDrawingController = class {
         canvasHeight: this.canvasHeight(),
         frame: context.frame,
         viewportHeight: context.viewportHeight,
-        lineToCanvasY
+        lineToCanvasY,
+        preferDocumentFlow: isMobileRuntime()
       });
       if (layout?.id && box) {
         projected.push(box);
@@ -4887,7 +4890,7 @@ var PreviewDrawingController = class {
     return clamp(rect.width - insets.horizontal, 24, 900);
   }
   openFloatingTextInput(point, index = -1) {
-    this.endFloatingTextInput(false);
+    this.endFloatingTextInput(true);
     this.endTextEdit();
     if (!this.drawingsVisible) {
       this.setDrawingsVisible(true);
@@ -5057,6 +5060,10 @@ var PreviewDrawingController = class {
       return;
     }
     if (commit && !state.committed) {
+      if (state.composing) {
+        state.composing = false;
+        state.commitAfterComposition = false;
+      }
       this.commitFloatingTextInput(state);
       return;
     }
@@ -8734,13 +8741,17 @@ function measureResponsiveContentFrame(previewEl, surfaceType, surfaceWidth, can
   const contentRect = content?.getBoundingClientRect?.();
   const surfaceRect = canvas?.getBoundingClientRect?.() || previewEl?.getBoundingClientRect?.();
   if (!contentRect || !surfaceRect || contentRect.width <= 1) {
-    return normalizeContentFrame({ surfaceWidth, contentLeft: 0, contentWidth: surfaceWidth });
+    return constrainWideContentFrame({
+      surfaceWidth,
+      contentLeft: 0,
+      contentWidth: surfaceWidth
+    }, { isMobile: isMobileRuntime() });
   }
-  return normalizeContentFrame({
+  return constrainWideContentFrame({
     surfaceWidth,
     contentLeft: contentRect.left - surfaceRect.left,
     contentWidth: contentRect.width
-  });
+  }, { isMobile: isMobileRuntime() });
 }
 function measureResponsiveViewportHeight(previewEl, scrollContainer) {
   const scrollRect = scrollContainer?.getBoundingClientRect?.();
@@ -8770,7 +8781,8 @@ function needsElementLayoutMigration(strokes) {
 function isStableResponsiveCaptureFrame(surfaceWidth, frame) {
   const width = Number(surfaceWidth) || 0;
   const contentWidth = Number(frame?.width) || 0;
-  return width >= 180 && contentWidth >= 140 && contentWidth / width >= 0.42;
+  const stableWideLane = width >= 900 && contentWidth >= 720;
+  return width >= 180 && contentWidth >= 140 && (contentWidth / width >= 0.42 || stableWideLane);
 }
 function responsiveLayoutSignature(width, height, frame, surfaceType, viewportHeight) {
   return [

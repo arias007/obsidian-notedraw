@@ -202,12 +202,22 @@ export function createElementLayout({
   });
 }
 
-function projectCorner(corner, target, lineToCanvasY) {
+function projectCorner(corner, target, lineToCanvasY, sourceInput = null, preferDocumentFlow = null) {
   if (!corner) {
     return null;
   }
   const frame = normalizeFrame(target);
-  const fallbackY = corner.y * frame.documentHeight;
+  let fallbackY = corner.y * frame.documentHeight;
+  if (sourceInput && typeof preferDocumentFlow === "boolean") {
+    const source = normalizeFrame(sourceInput);
+    const sourceY = corner.y * source.documentHeight;
+    const widthScale = clamp(frame.contentWidth / source.contentWidth, 0.2, 5);
+    const viewportScale = clamp(frame.viewportHeight / source.viewportHeight, 0.25, 4);
+    const documentScale = clamp(frame.documentHeight / source.documentHeight, 0.28, 3.6);
+    const laneScale = Math.exp(Math.log(widthScale) * 0.38 + Math.log(viewportScale) * 0.62);
+    const fallbackScale = blendScale(laneScale, documentScale, preferDocumentFlow ? 0.78 : 0.04);
+    fallbackY = clamp(sourceY * fallbackScale, 0, frame.documentHeight);
+  }
   const lineY = corner.line !== null && typeof lineToCanvasY === "function"
     ? Number(lineToCanvasY(corner.path, corner.line))
     : NaN;
@@ -232,7 +242,8 @@ export function elementLayoutNeedsRepair(layoutInput) {
     return true;
   }
   const frame = layout.sourceFrame;
-  if (frame.surfaceWidth < 180 || frame.contentWidth < 140 || frame.contentWidth / frame.surfaceWidth < 0.42) {
+  const stableWideLane = frame.surfaceWidth >= 900 && frame.contentWidth >= 720;
+  if (frame.surfaceWidth < 180 || frame.contentWidth < 140 || (frame.contentWidth / frame.surfaceWidth < 0.42 && !stableWideLane)) {
     return true;
   }
   const verticalSpan = layout.box.height / Math.max(1, frame.documentHeight);
@@ -335,7 +346,8 @@ export function projectElementLayout(layoutInput, {
   canvasHeight,
   frame,
   viewportHeight,
-  lineToCanvasY
+  lineToCanvasY,
+  preferDocumentFlow = null
 } = {}) {
   const layout = normalizeElementLayout(layoutInput);
   if (!layout) {
@@ -348,14 +360,14 @@ export function projectElementLayout(layoutInput, {
     viewportHeight: viewportHeight || canvasHeight,
     documentHeight: canvasHeight
   });
-  const primary = projectCorner(layout.corners.topLeft, targetFrame, lineToCanvasY);
+  const primary = projectCorner(layout.corners.topLeft, targetFrame, lineToCanvasY, layout.sourceFrame, preferDocumentFlow);
   if (!primary) {
     return null;
   }
   let { xScale, yScale, scale } = calculateElementScales(layout.sourceFrame, targetFrame, layout.box);
-  const projectedRight = projectCorner(layout.corners.topRight, targetFrame, lineToCanvasY);
-  const projectedBottom = projectCorner(layout.corners.bottomLeft, targetFrame, lineToCanvasY);
-  const projectedBottomRight = projectCorner(layout.corners.bottomRight, targetFrame, lineToCanvasY);
+  const projectedRight = projectCorner(layout.corners.topRight, targetFrame, lineToCanvasY, layout.sourceFrame, preferDocumentFlow);
+  const projectedBottom = projectCorner(layout.corners.bottomLeft, targetFrame, lineToCanvasY, layout.sourceFrame, preferDocumentFlow);
+  const projectedBottomRight = projectCorner(layout.corners.bottomRight, targetFrame, lineToCanvasY, layout.sourceFrame, preferDocumentFlow);
   const cornerXScales = [];
   const cornerYScales = [];
   if (projectedRight && layout.box.width > 0.01) {

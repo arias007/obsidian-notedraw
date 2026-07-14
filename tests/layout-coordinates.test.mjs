@@ -3,10 +3,39 @@ import test from "node:test";
 
 import {
   RESPONSIVE_POINT_BASIS,
+  constrainWideContentFrame,
   createResponsivePoint,
   normalizeResponsiveAnchor,
   projectResponsivePoint
 } from "../src/layout-coordinates.mjs";
+
+test("wide desktop surfaces keep a left-aligned Markdown lane instead of stretching into blank space", () => {
+  assert.deepEqual(constrainWideContentFrame({
+    surfaceWidth: 1440,
+    contentLeft: 32,
+    contentWidth: 1376
+  }), {
+    left: 32,
+    width: 860,
+    surfaceWidth: 1440
+  });
+
+  assert.deepEqual(constrainWideContentFrame({
+    surfaceWidth: 1440,
+    contentLeft: 360,
+    contentWidth: 720
+  }), {
+    left: 360,
+    width: 720,
+    surfaceWidth: 1440
+  });
+
+  assert.equal(constrainWideContentFrame({
+    surfaceWidth: 1440,
+    contentLeft: 32,
+    contentWidth: 1376
+  }, { isMobile: true }).width, 1376);
+});
 
 test("content-relative x follows the Markdown lane from desktop to mobile", () => {
   const point = createResponsivePoint({

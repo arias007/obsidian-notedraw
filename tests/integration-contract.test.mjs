@@ -27,15 +27,15 @@ test("the stable v1 API exposes Cancip-friendly capabilities and events", async 
   assert.match(source, /on: \(eventName, listener\) => this\.onApiEvent\(eventName, listener\)/);
 });
 
-test("3.1.47 stabilizes element frames and input recovery without eager hidden-view refresh", async () => {
+test("3.1.48 stabilizes text commits and cross-view frames without eager hidden-view refresh", async () => {
   const [source, manifestText] = await Promise.all([
     readFile(sourceUrl, "utf8"),
     readFile(manifestUrl, "utf8")
   ]);
   const manifest = JSON.parse(manifestText);
 
-  assert.equal(manifest.version, "3.1.47");
-  assert.match(source, /version: "3\.1\.47"/);
+  assert.equal(manifest.version, "3.1.48");
+  assert.match(source, /version: "3\.1\.48"/);
   assert.match(source, /if \(!this\.responsivePointsInitialized \|\| signature !== this\.responsiveLayoutSignature\)/);
   assert.match(source, /migratedDrawingData\.version = Math\.max\(3/);
   assert.match(source, /captureElementLayoutForStroke/);
@@ -125,4 +125,22 @@ test("deactivating the wand promotes selected text and drawings back into the st
   const source = await readFile(sourceUrl, "utf8");
 
   assert.match(source, /if \(!this\.active && wasActive\)[\s\S]*this\.clearSelectedStrokes\(\);[\s\S]*this\.resetTouchGestureState\(\);[\s\S]*this\.render\(\)/);
+});
+
+test("non-empty floating text commits before wand, view, file, or controller teardown", async () => {
+  const source = await readFile(sourceUrl, "utf8");
+
+  assert.match(source, /async setFile\(file\)[\s\S]*this\.endTextEdit\(\);\s*this\.endFloatingTextInput\(true\)/);
+  assert.match(source, /destroy\(\)[\s\S]*this\.endTextEdit\(\);\s*this\.endFloatingTextInput\(true\);\s*this\.destroyed = true/);
+  assert.match(source, /if \(!this\.active && wasActive\)[\s\S]*this\.endFloatingTextInput\(true\)/);
+  assert.match(source, /setEditMarkdownMode\(\)[\s\S]*this\.endFloatingTextInput\(true\)/);
+  assert.match(source, /openFloatingTextInput\(point, index = -1\) \{\s*this\.endFloatingTextInput\(true\)/);
+  assert.match(source, /if \(state\.composing\) \{\s*state\.composing = false;\s*state\.commitAfterComposition = false/);
+});
+
+test("runtime layout uses a capped desktop Markdown lane and mobile-aware vertical flow", async () => {
+  const source = await readFile(sourceUrl, "utf8");
+
+  assert.match(source, /constrainWideContentFrame\(\{\s*surfaceWidth,[\s\S]*contentWidth: contentRect\.width[\s\S]*\}, \{ isMobile: isMobileRuntime\(\) \}\)/);
+  assert.match(source, /preferDocumentFlow: isMobileRuntime\(\)/);
 });

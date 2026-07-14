@@ -50,6 +50,25 @@ export function normalizeContentFrame({ surfaceWidth, contentLeft = 0, contentWi
   return { left, width: frameWidth, surfaceWidth: width };
 }
 
+export function constrainWideContentFrame(frameInput, {
+  isMobile = false,
+  minSurfaceWidth = 900,
+  minLaneWidth = 720,
+  maxLaneWidth = 860,
+  filledRatio = 0.78
+} = {}) {
+  const frame = normalizeContentFrame(frameInput);
+  if (isMobile || frame.surfaceWidth < minSurfaceWidth || frame.width / frame.surfaceWidth < filledRatio) {
+    return frame;
+  }
+  const laneLimit = clamp(frame.surfaceWidth * 0.72, minLaneWidth, maxLaneWidth);
+  const available = Math.max(1, frame.surfaceWidth - Math.max(0, frame.left));
+  return {
+    ...frame,
+    width: Math.min(frame.width, laneLimit, available)
+  };
+}
+
 export function normalizeResponsiveAnchor(anchor) {
   if (!anchor || anchor.basis !== RESPONSIVE_POINT_BASIS) {
     return null;

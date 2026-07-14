@@ -180,6 +180,24 @@ function normalizeContentFrame({ surfaceWidth, contentLeft = 0, contentWidth } =
   const frameWidth = clamp2(finite(contentWidth, available), 1, width * 2);
   return { left, width: frameWidth, surfaceWidth: width };
 }
+function constrainWideContentFrame(frameInput, {
+  isMobile = false,
+  minSurfaceWidth = 900,
+  minLaneWidth = 720,
+  maxLaneWidth = 860,
+  filledRatio = 0.78
+} = {}) {
+  const frame = normalizeContentFrame(frameInput);
+  if (isMobile || frame.surfaceWidth < minSurfaceWidth || frame.width / frame.surfaceWidth < filledRatio) {
+    return frame;
+  }
+  const laneLimit = clamp2(frame.surfaceWidth * 0.72, minLaneWidth, maxLaneWidth);
+  const available = Math.max(1, frame.surfaceWidth - Math.max(0, frame.left));
+  return {
+    ...frame,
+    width: Math.min(frame.width, laneLimit, available)
+  };
+}
 function normalizeResponsiveAnchor(anchor) {
   if (!anchor || anchor.basis !== RESPONSIVE_POINT_BASIS) {
     return null;
@@ -453,12 +471,22 @@ function createElementLayout({
     relations
   });
 }
-function projectCorner(corner, target, lineToCanvasY) {
+function projectCorner(corner, target, lineToCanvasY, sourceInput = null, preferDocumentFlow = null) {
   if (!corner) {
     return null;
   }
   const frame = normalizeFrame(target);
-  const fallbackY = corner.y * frame.documentHeight;
+  let fallbackY = corner.y * frame.documentHeight;
+  if (sourceInput && typeof preferDocumentFlow === "boolean") {
+    const source = normalizeFrame(sourceInput);
+    const sourceY = corner.y * source.documentHeight;
+    const widthScale = clamp3(frame.contentWidth / source.contentWidth, 0.2, 5);
+    const viewportScale = clamp3(frame.viewportHeight / source.viewportHeight, 0.25, 4);
+    const documentScale = clamp3(frame.documentHeight / source.documentHeight, 0.28, 3.6);
+    const laneScale = Math.exp(Math.log(widthScale) * 0.38 + Math.log(viewportScale) * 0.62);
+    const fallbackScale = blendScale(laneScale, documentScale, preferDocumentFlow ? 0.78 : 0.04);
+    fallbackY = clamp3(sourceY * fallbackScale, 0, frame.documentHeight);
+  }
   const lineY = corner.line !== null && typeof lineToCanvasY === "function" ? Number(lineToCanvasY(corner.path, corner.line)) : NaN;
   const firstLineIsPlausible = corner.line === null || corner.line >= 1 || corner.y <= 0.15;
   const lineIsReliable = canTrustCornerLine(corner);
@@ -478,7 +506,8 @@ function elementLayoutNeedsRepair(layoutInput) {
     return true;
   }
   const frame = layout.sourceFrame;
-  if (frame.surfaceWidth < 180 || frame.contentWidth < 140 || frame.contentWidth / frame.surfaceWidth < 0.42) {
+  const stableWideLane = frame.surfaceWidth >= 900 && frame.contentWidth >= 720;
+  if (frame.surfaceWidth < 180 || frame.contentWidth < 140 || frame.contentWidth / frame.surfaceWidth < 0.42 && !stableWideLane) {
     return true;
   }
   const verticalSpan = layout.box.height / Math.max(1, frame.documentHeight);
@@ -568,7 +597,8 @@ function projectElementLayout(layoutInput, {
   canvasHeight,
   frame,
   viewportHeight,
-  lineToCanvasY
+  lineToCanvasY,
+  preferDocumentFlow = null
 } = {}) {
   const layout = normalizeElementLayout(layoutInput);
   if (!layout) {
@@ -581,14 +611,14 @@ function projectElementLayout(layoutInput, {
     viewportHeight: viewportHeight || canvasHeight,
     documentHeight: canvasHeight
   });
-  const primary = projectCorner(layout.corners.topLeft, targetFrame, lineToCanvasY);
+  const primary = projectCorner(layout.corners.topLeft, targetFrame, lineToCanvasY, layout.sourceFrame, preferDocumentFlow);
   if (!primary) {
     return null;
   }
   let { xScale, yScale, scale } = calculateElementScales(layout.sourceFrame, targetFrame, layout.box);
-  const projectedRight = projectCorner(layout.corners.topRight, targetFrame, lineToCanvasY);
-  const projectedBottom = projectCorner(layout.corners.bottomLeft, targetFrame, lineToCanvasY);
-  const projectedBottomRight = projectCorner(layout.corners.bottomRight, targetFrame, lineToCanvasY);
+  const projectedRight = projectCorner(layout.corners.topRight, targetFrame, lineToCanvasY, layout.sourceFrame, preferDocumentFlow);
+  const projectedBottom = projectCorner(layout.corners.bottomLeft, targetFrame, lineToCanvasY, layout.sourceFrame, preferDocumentFlow);
+  const projectedBottomRight = projectCorner(layout.corners.bottomRight, targetFrame, lineToCanvasY, layout.sourceFrame, preferDocumentFlow);
   const cornerXScales = [];
   const cornerYScales = [];
   if (projectedRight && layout.box.width > 0.01) {
@@ -2318,7 +2348,7 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
       on: (eventName, listener) => this.onApiEvent(eventName, listener)
     };
     return {
-      version: "3.1.47",
+      version: "3.1.48",
       apiVersion: v1.apiVersion,
       capabilities,
       v1,
@@ -3795,6 +3825,7 @@ var PreviewDrawingController = class {
       return;
     }
     this.endTextEdit();
+    this.endFloatingTextInput(true);
     this.cancelRenderFrame();
     this.cancelResizeFrame();
     this.resetCanvasSurface();
@@ -3868,10 +3899,10 @@ var PreviewDrawingController = class {
     if (this.destroyed) {
       return;
     }
+    this.endTextEdit();
+    this.endFloatingTextInput(true);
     this.destroyed = true;
     this.layoutRefreshGeneration += 1;
-    this.endTextEdit();
-    this.endFloatingTextInput(false);
     this.clearButtonLongPress();
     this.cancelRenderFrame();
     this.cancelResizeFrame();
@@ -3969,7 +4000,7 @@ var PreviewDrawingController = class {
     this.button?.classList.toggle("is-active", this.active);
     if (!this.active && wasActive) {
       this.endTextEdit();
-      this.endFloatingTextInput(false);
+      this.endFloatingTextInput(true);
       this.setPaletteOpen(false);
       this.setTextPanelOpen(false);
       this.hideSelectionMenu();
@@ -4221,7 +4252,7 @@ var PreviewDrawingController = class {
     this.clearSelectedStrokes();
     this.setPaletteOpen(false);
     this.setTextPanelOpen(false);
-    this.endFloatingTextInput(false);
+    this.endFloatingTextInput(true);
     this.endTextEdit();
     this.cancelCurrentStroke();
     this.cancelSelectionDrag(true);
@@ -5265,7 +5296,8 @@ var PreviewDrawingController = class {
         canvasHeight: this.canvasHeight(),
         frame: context.frame,
         viewportHeight: context.viewportHeight,
-        lineToCanvasY
+        lineToCanvasY,
+        preferDocumentFlow: isMobileRuntime()
       });
       if (layout?.id && box) {
         projected.push(box);
@@ -5851,7 +5883,7 @@ var PreviewDrawingController = class {
     return clamp5(rect.width - insets.horizontal, 24, 900);
   }
   openFloatingTextInput(point, index = -1) {
-    this.endFloatingTextInput(false);
+    this.endFloatingTextInput(true);
     this.endTextEdit();
     if (!this.drawingsVisible) {
       this.setDrawingsVisible(true);
@@ -6015,6 +6047,10 @@ var PreviewDrawingController = class {
       return;
     }
     if (commit && !state.committed) {
+      if (state.composing) {
+        state.composing = false;
+        state.commitAfterComposition = false;
+      }
       this.commitFloatingTextInput(state);
       return;
     }
@@ -9695,13 +9731,17 @@ function measureResponsiveContentFrame(previewEl, surfaceType, surfaceWidth, can
   const contentRect = content?.getBoundingClientRect?.();
   const surfaceRect = canvas?.getBoundingClientRect?.() || previewEl?.getBoundingClientRect?.();
   if (!contentRect || !surfaceRect || contentRect.width <= 1) {
-    return normalizeContentFrame({ surfaceWidth, contentLeft: 0, contentWidth: surfaceWidth });
+    return constrainWideContentFrame({
+      surfaceWidth,
+      contentLeft: 0,
+      contentWidth: surfaceWidth
+    }, { isMobile: isMobileRuntime() });
   }
-  return normalizeContentFrame({
+  return constrainWideContentFrame({
     surfaceWidth,
     contentLeft: contentRect.left - surfaceRect.left,
     contentWidth: contentRect.width
-  });
+  }, { isMobile: isMobileRuntime() });
 }
 function measureResponsiveViewportHeight(previewEl, scrollContainer) {
   const scrollRect = scrollContainer?.getBoundingClientRect?.();
@@ -9731,7 +9771,8 @@ function needsElementLayoutMigration(strokes) {
 function isStableResponsiveCaptureFrame(surfaceWidth, frame) {
   const width = Number(surfaceWidth) || 0;
   const contentWidth = Number(frame?.width) || 0;
-  return width >= 180 && contentWidth >= 140 && contentWidth / width >= 0.42;
+  const stableWideLane = width >= 900 && contentWidth >= 720;
+  return width >= 180 && contentWidth >= 140 && (contentWidth / width >= 0.42 || stableWideLane);
 }
 function responsiveLayoutSignature(width, height, frame, surfaceType, viewportHeight) {
   return [
