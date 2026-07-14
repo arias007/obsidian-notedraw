@@ -485,11 +485,33 @@ function elementLayoutNeedsRepair(layoutInput) {
   }
   return false;
 }
-function calculateElementScale(sourceFrameInput, targetFrameInput, boxInput = {}) {
+function clampAxisRatio(scales, { maxXOverY = 1.65, maxYOverX = 1.9 } = {}) {
+  let xScale = finite2(scales.xScale, finite2(scales.scale, 1));
+  let yScale = finite2(scales.yScale, finite2(scales.scale, 1));
+  if (xScale > yScale * maxXOverY) {
+    xScale = yScale * maxXOverY;
+  }
+  if (yScale > xScale * maxYOverX) {
+    yScale = xScale * maxYOverX;
+  }
+  return {
+    xScale,
+    yScale,
+    scale: Math.sqrt(Math.max(1e-3, xScale * yScale))
+  };
+}
+function blendScale(base, candidate, weight) {
+  if (!Number.isFinite(candidate) || candidate <= 0) {
+    return base;
+  }
+  return Math.exp(Math.log(Math.max(1e-3, base)) * (1 - weight) + Math.log(Math.max(1e-3, candidate)) * weight);
+}
+function calculateElementScales(sourceFrameInput, targetFrameInput, boxInput = {}) {
   const source = normalizeFrame(sourceFrameInput);
   const target = normalizeFrame(targetFrameInput);
   const box = normalizeBox(boxInput);
   const widthScale = clamp3(target.contentWidth / source.contentWidth, 0.2, 5);
+  const documentScale = clamp3(target.documentHeight / source.documentHeight, 0.2, 5);
   const viewportScale = clamp3(target.viewportHeight / source.viewportHeight, 0.25, 4);
   const aspectChange = target.aspectRatio / Math.max(0.01, source.aspectRatio);
   const widthWeight = aspectChange < 0.9 ? 0.8 : aspectChange > 1.35 ? 0.62 : 0.7;
@@ -498,7 +520,23 @@ function calculateElementScale(sourceFrameInput, targetFrameInput, boxInput = {}
   );
   scale = clamp3(scale, Math.max(0.42, widthScale * 0.58), Math.min(2.4, widthScale * 1.55));
   const fitScale = target.contentWidth * 0.98 / Math.max(1, box.width);
-  return clamp3(Math.min(scale, fitScale), 0.42, 2.4);
+  scale = clamp3(Math.min(scale, fitScale), 0.42, 2.4);
+  const portraitTarget = target.aspectRatio < 0.62 || target.contentWidth < 430 && target.viewportHeight > target.contentWidth * 1.2;
+  const wideTarget = target.aspectRatio > 1.05;
+  let xScale = blendScale(widthScale, scale, portraitTarget ? 0.12 : 0.24);
+  let yScale = Math.exp(
+    Math.log(documentScale) * (portraitTarget ? 0.74 : wideTarget ? 0.56 : 0.64) + Math.log(viewportScale) * (portraitTarget ? 0.26 : wideTarget ? 0.44 : 0.36)
+  );
+  yScale = blendScale(yScale, scale, portraitTarget ? 0.1 : 0.22);
+  xScale = clamp3(Math.min(xScale, fitScale), 0.34, 2.8);
+  yScale = clamp3(yScale, 0.34, 2.8);
+  if (portraitTarget) {
+    return clampAxisRatio({ xScale, yScale, scale }, { maxXOverY: 1.25, maxYOverX: 2.15 });
+  }
+  if (wideTarget) {
+    return clampAxisRatio({ xScale, yScale, scale }, { maxXOverY: 1.75, maxYOverX: 1.45 });
+  }
+  return clampAxisRatio({ xScale, yScale, scale }, { maxXOverY: 1.55, maxYOverX: 1.65 });
 }
 function projectElementLayout(layoutInput, {
   canvasWidth,
@@ -522,32 +560,49 @@ function projectElementLayout(layoutInput, {
   if (!primary) {
     return null;
   }
-  let scale = calculateElementScale(layout.sourceFrame, targetFrame, layout.box);
+  let { xScale, yScale, scale } = calculateElementScales(layout.sourceFrame, targetFrame, layout.box);
   const projectedRight = projectCorner(layout.corners.topRight, targetFrame, lineToCanvasY);
   const projectedBottom = projectCorner(layout.corners.bottomLeft, targetFrame, lineToCanvasY);
   const projectedBottomRight = projectCorner(layout.corners.bottomRight, targetFrame, lineToCanvasY);
-  const cornerScales = [];
+  const cornerXScales = [];
+  const cornerYScales = [];
   if (projectedRight && layout.box.width > 0.01) {
-    cornerScales.push(Math.abs(projectedRight.x - primary.x) / layout.box.width);
+    cornerXScales.push(Math.abs(projectedRight.x - primary.x) / layout.box.width);
   }
-  if (projectedBottom?.lineAnchored && primary.lineAnchored && layout.box.height > 0.01) {
-    cornerScales.push(Math.abs(projectedBottom.y - primary.y) / layout.box.height);
+  if (projectedBottomRight && projectedBottom && layout.box.width > 0.01) {
+    cornerXScales.push(Math.abs(projectedBottomRight.x - projectedBottom.x) / layout.box.width);
   }
-  if (projectedBottomRight?.lineAnchored && projectedRight?.lineAnchored && layout.box.height > 0.01) {
-    cornerScales.push(Math.abs(projectedBottomRight.y - projectedRight.y) / layout.box.height);
+  if (projectedBottom && layout.box.height > 0.01) {
+    cornerYScales.push(Math.abs(projectedBottom.y - primary.y) / layout.box.height);
   }
-  const reliableCornerScales = cornerScales.filter((value) => Number.isFinite(value) && value >= scale * 0.45 && value <= scale * 2.2);
-  if (reliableCornerScales.length) {
-    const cornerScale = reliableCornerScales.reduce((sum, value) => sum + value, 0) / reliableCornerScales.length;
-    scale = clamp3(scale * 0.72 + cornerScale * 0.28, scale * 0.72, scale * 1.28);
+  if (projectedBottomRight && projectedRight && layout.box.height > 0.01) {
+    cornerYScales.push(Math.abs(projectedBottomRight.y - projectedRight.y) / layout.box.height);
+  }
+  const reliableXScales = cornerXScales.filter((value) => Number.isFinite(value) && value >= xScale * 0.42 && value <= xScale * 2.35);
+  const reliableYScales = cornerYScales.filter((value) => Number.isFinite(value) && value >= yScale * 0.36 && value <= yScale * 2.6);
+  if (reliableXScales.length) {
+    const cornerScale = reliableXScales.reduce((sum, value) => sum + value, 0) / reliableXScales.length;
+    xScale = clamp3(blendScale(xScale, cornerScale, 0.46), xScale * 0.62, xScale * 1.42);
+  }
+  if (reliableYScales.length) {
+    const cornerScale = reliableYScales.reduce((sum, value) => sum + value, 0) / reliableYScales.length;
+    yScale = clamp3(blendScale(yScale, cornerScale, 0.5), yScale * 0.56, yScale * 1.55);
+  }
+  const targetIsPortrait = targetFrame.aspectRatio < 0.62 || targetFrame.contentWidth < 430 && targetFrame.viewportHeight > targetFrame.contentWidth * 1.2;
+  const targetIsWide = targetFrame.aspectRatio > 1.05;
+  ({ xScale, yScale, scale } = clampAxisRatio({ xScale, yScale, scale }, targetIsPortrait ? { maxXOverY: 1.25, maxYOverX: 2.15 } : targetIsWide ? { maxXOverY: 1.75, maxYOverX: 1.45 } : { maxXOverY: 1.55, maxYOverX: 1.65 }));
+  const fitXScale = targetFrame.contentWidth * 0.98 / Math.max(1, layout.box.width);
+  if (xScale > fitXScale) {
+    xScale = fitXScale;
+    scale = Math.sqrt(Math.max(1e-3, xScale * yScale));
   }
   let x = primary.x;
   if (projectedBottom && Number.isFinite(projectedBottom.x) && Math.abs(projectedBottom.x - primary.x) <= Math.max(24, layout.box.width * scale * 0.25)) {
     x = (primary.x + projectedBottom.x) / 2;
   }
   const y = primary.y;
-  const width = Math.max(0.01, layout.box.width * scale);
-  const height = Math.max(0.01, layout.box.height * scale);
+  const width = Math.max(0.01, layout.box.width * xScale);
+  const height = Math.max(0.01, layout.box.height * yScale);
   const maxX = Math.max(0, targetFrame.surfaceWidth - width);
   const maxY = Math.max(0, targetFrame.documentHeight - height);
   const clampedX = clamp3(x, 0, maxX);
@@ -559,6 +614,8 @@ function projectElementLayout(layoutInput, {
     width,
     height,
     scale,
+    xScale,
+    yScale,
     anchorX: clampedX,
     anchorY: clampedY,
     primaryAnchoredToLine: primary.lineAnchored
@@ -598,6 +655,8 @@ function captureElementRelations(items, { nearDistance = 80, maxRelations = 3 } 
   const normalized = (Array.isArray(items) ? items : []).map((item) => ({
     id: typeof item?.id === "string" ? item.id : "",
     scale: clamp3(finite2(item?.scale, 1), 0.05, 20),
+    xScale: clamp3(finite2(item?.xScale, item?.scale ?? 1), 0.05, 20),
+    yScale: clamp3(finite2(item?.yScale, item?.scale ?? 1), 0.05, 20),
     bounds: normalizeBox({
       x: item?.bounds?.minX ?? item?.bounds?.x,
       y: item?.bounds?.minY ?? item?.bounds?.y,
@@ -646,7 +705,8 @@ function captureElementRelations(items, { nearDistance = 80, maxRelations = 3 } 
         continue;
       }
       const kind = overlap > 0 ? "intersection" : "near";
-      const relationScale = Math.max(0.05, (source.scale + target.scale) / 2);
+      const relationScaleX = Math.max(0.05, (source.xScale + target.xScale) / 2);
+      const relationScaleY = Math.max(0.05, (source.yScale + target.yScale) / 2);
       const cornerPair = kind === "intersection" ? { sourceCorner: "topLeft", targetCorner: "topLeft" } : nearestCornerPair(source.bounds, target.bounds);
       const sourceCornerPoint = boxCorner(source.bounds, cornerPair.sourceCorner);
       const targetCornerPoint = boxCorner(target.bounds, cornerPair.targetCorner);
@@ -655,8 +715,8 @@ function captureElementRelations(items, { nearDistance = 80, maxRelations = 3 } 
         kind,
         sourceCorner: cornerPair.sourceCorner,
         targetCorner: cornerPair.targetCorner,
-        dx: (targetCornerPoint.x - sourceCornerPoint.x) / relationScale,
-        dy: (targetCornerPoint.y - sourceCornerPoint.y) / relationScale,
+        dx: (targetCornerPoint.x - sourceCornerPoint.x) / relationScaleX,
+        dy: (targetCornerPoint.y - sourceCornerPoint.y) / relationScaleY,
         weight: kind === "intersection" ? 0.28 : 0.14,
         score: kind === "intersection" ? -overlap - 1 : gap
       });
@@ -681,16 +741,17 @@ function stabilizeElementRelations(projectedItems, layouts) {
       if (!target) {
         continue;
       }
-      const relationScale = (finite2(source.scale, 1) + finite2(target.scale, 1)) / 2;
+      const relationScaleX = (finite2(source.xScale, source.scale) + finite2(target.xScale, target.scale)) / 2;
+      const relationScaleY = (finite2(source.yScale, source.scale) + finite2(target.yScale, target.scale)) / 2;
       const sourceOffset = boxCorner({ x: 0, y: 0, width: source.width, height: source.height }, relation.sourceCorner);
       const targetCorner = boxCorner(target, relation.targetCorner);
-      const expectedX = targetCorner.x - relation.dx * relationScale - sourceOffset.x;
-      const expectedY = targetCorner.y - relation.dy * relationScale - sourceOffset.y;
-      const minSize = Math.min(source.width, source.height);
-      const limit = relation.kind === "near" ? Math.min(72, Math.max(24, minSize * 0.35)) : Math.min(96, Math.max(32, minSize * 0.5));
+      const expectedX = targetCorner.x - relation.dx * relationScaleX - sourceOffset.x;
+      const expectedY = targetCorner.y - relation.dy * relationScaleY - sourceOffset.y;
+      const limitX = relation.kind === "near" ? Math.min(72, Math.max(24, source.width * 0.35)) : Math.min(96, Math.max(32, source.width * 0.5));
+      const limitY = relation.kind === "near" ? Math.min(72, Math.max(24, source.height * 0.35)) : Math.min(96, Math.max(32, source.height * 0.5));
       const current = corrections.get(source.id) || { x: 0, y: 0, weight: 0 };
-      current.x += clamp3(expectedX - source.x, -limit, limit) * relation.weight;
-      current.y += clamp3(expectedY - source.y, -limit, limit) * relation.weight;
+      current.x += clamp3(expectedX - source.x, -limitX, limitX) * relation.weight;
+      current.y += clamp3(expectedY - source.y, -limitY, limitY) * relation.weight;
       current.weight += relation.weight;
       corrections.set(source.id, current);
     }
@@ -736,13 +797,16 @@ function projectElementPoints(points, layoutInput, projectedBox, { canvasWidth, 
 }
 function scaleElementMetrics(metricsInput, scaleInput) {
   const metrics = normalizeMetrics(metricsInput);
-  const scale = clamp3(finite2(scaleInput, 1), 0.42, 2.4);
+  const scaleBox = typeof scaleInput === "object" && scaleInput ? scaleInput : null;
+  const scale = clamp3(finite2(scaleBox?.scale, finite2(scaleInput, 1)), 0.42, 2.4);
+  const xScale = clamp3(finite2(scaleBox?.xScale, scale), 0.34, 2.8);
+  const yScale = clamp3(finite2(scaleBox?.yScale, scale), 0.34, 2.8);
   return {
     width: metrics.width ? clamp3(metrics.width * scale, 0.5, 80) : void 0,
     fontSize: metrics.fontSize ? clamp3(metrics.fontSize * scale, 10, 72) : void 0,
-    textWidth: metrics.textWidth ? clamp3(metrics.textWidth * scale, 24, 900) : void 0,
-    previewWidth: metrics.previewWidth ? clamp3(metrics.previewWidth * scale, 80, 900) : void 0,
-    previewHeight: metrics.previewHeight ? clamp3(metrics.previewHeight * scale, 40, 700) : void 0
+    textWidth: metrics.textWidth ? clamp3(metrics.textWidth * xScale, 24, 900) : void 0,
+    previewWidth: metrics.previewWidth ? clamp3(metrics.previewWidth * xScale, 80, 900) : void 0,
+    previewHeight: metrics.previewHeight ? clamp3(metrics.previewHeight * yScale, 40, 700) : void 0
   };
 }
 
@@ -2165,7 +2229,7 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
       on: (eventName, listener) => this.onApiEvent(eventName, listener)
     };
     return {
-      version: "3.1.44",
+      version: "3.1.45",
       apiVersion: v1.apiVersion,
       capabilities,
       v1,
@@ -5002,7 +5066,9 @@ var PreviewDrawingController = class {
       items.push({
         id: layout.id,
         bounds,
-        scale: Math.max(0.05, (widthScale + heightScale) / 2)
+        scale: Math.max(0.05, Math.sqrt(Math.max(1e-3, widthScale * heightScale))),
+        xScale: Math.max(0.05, widthScale),
+        yScale: Math.max(0.05, heightScale)
       });
       layoutsById.set(layout.id, layout);
     }
@@ -5103,7 +5169,7 @@ var PreviewDrawingController = class {
           canvasWidth: this.canvasWidth(),
           canvasHeight: this.canvasHeight()
         });
-        const metrics = scaleElementMetrics(layout.metrics, box.scale);
+        const metrics = scaleElementMetrics(layout.metrics, box);
         if (metrics.width) {
           stroke.width = metrics.width;
         }

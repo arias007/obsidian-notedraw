@@ -138,7 +138,7 @@ test("all four corners retain Markdown anchors while top-left remains primary", 
   assert.equal(projected.primaryAnchoredToLine, true);
 });
 
-test("uniform element projection preserves freehand and media proportions", () => {
+test("adaptive element projection reshapes boxes for portrait and wide screens", () => {
   const layout = createElementLayout({
     id: "freehand",
     bounds: { minX: 100, minY: 200, maxX: 300, maxY: 300 },
@@ -148,23 +148,40 @@ test("uniform element projection preserves freehand and media proportions", () =
     frame: { left: 60, width: 480 },
     metrics: { fontSize: 20, textWidth: 180, previewWidth: 320, previewHeight: 200 }
   });
-  const projectedBox = projectElementLayout(layout, {
+  const portraitBox = projectElementLayout(layout, {
     canvasWidth: 360,
     canvasHeight: 2200,
     viewportHeight: 780,
     frame: { left: 20, width: 320 }
   });
-  const projectedPoints = projectElementPoints([
+  const portraitPoints = projectElementPoints([
     { x: 100 / 600, y: 200 / 1200, anchor: { x: 40 / 480, y: 200 / 1200 } },
     { x: 300 / 600, y: 300 / 1200, anchor: { x: 240 / 480, y: 300 / 1200 } }
-  ], layout, projectedBox, { canvasWidth: 360, canvasHeight: 2200 });
-  const dx = (projectedPoints[1].x - projectedPoints[0].x) * 360;
-  const dy = (projectedPoints[1].y - projectedPoints[0].y) * 2200;
-  const metrics = scaleElementMetrics(layout.metrics, projectedBox.scale);
+  ], layout, portraitBox, { canvasWidth: 360, canvasHeight: 2200 });
+  const portraitDx = (portraitPoints[1].x - portraitPoints[0].x) * 360;
+  const portraitDy = (portraitPoints[1].y - portraitPoints[0].y) * 2200;
+  const portraitMetrics = scaleElementMetrics(layout.metrics, portraitBox);
 
-  assert.ok(Math.abs(dx / 200 - dy / 100) < 1e-9);
-  assert.ok(Math.abs(metrics.previewWidth / metrics.previewHeight - 1.6) < 1e-9);
-  assert.ok(projectedBox.scale >= 0.42 && projectedBox.scale <= 2.4);
+  assert.ok(portraitBox.yScale > portraitBox.xScale, "phone portrait favors a taller, narrower element");
+  assert.ok(Math.abs(portraitDx - portraitBox.width) < 1e-9);
+  assert.ok(Math.abs(portraitDy - portraitBox.height) < 1e-9);
+  assert.ok(portraitMetrics.previewHeight > 200);
+  assert.ok(portraitMetrics.previewWidth < 320);
+
+  const wideBox = projectElementLayout(layout, {
+    canvasWidth: 1200,
+    canvasHeight: 900,
+    viewportHeight: 720,
+    frame: { left: 80, width: 960 }
+  });
+  const wideMetrics = scaleElementMetrics(layout.metrics, wideBox);
+
+  assert.ok(wideBox.xScale > wideBox.yScale, "wide desktop panes favor a flatter element");
+  assert.ok(wideBox.width > layout.box.width);
+  assert.ok(wideBox.height < layout.box.height);
+  assert.ok(wideMetrics.previewWidth > 320);
+  assert.ok(wideMetrics.previewHeight < 200);
+  assert.ok(wideBox.scale >= 0.42 && wideBox.scale <= 2.4);
 });
 
 test("reciprocal relation cycles reduce drift without diverging", () => {

@@ -1331,7 +1331,7 @@ var NoteDrawPlugin = class extends Plugin {
       on: (eventName, listener) => this.onApiEvent(eventName, listener)
     };
     return {
-      version: "3.1.44",
+      version: "3.1.45",
       apiVersion: v1.apiVersion,
       capabilities,
       v1,
@@ -4183,7 +4183,9 @@ var PreviewDrawingController = class {
       items.push({
         id: layout.id,
         bounds,
-        scale: Math.max(0.05, (widthScale + heightScale) / 2)
+        scale: Math.max(0.05, Math.sqrt(Math.max(0.001, widthScale * heightScale))),
+        xScale: Math.max(0.05, widthScale),
+        yScale: Math.max(0.05, heightScale)
       });
       layoutsById.set(layout.id, layout);
     }
@@ -4284,7 +4286,7 @@ var PreviewDrawingController = class {
           canvasWidth: this.canvasWidth(),
           canvasHeight: this.canvasHeight()
         });
-        const metrics = scaleElementMetrics(layout.metrics, box.scale);
+        const metrics = scaleElementMetrics(layout.metrics, box);
         if (metrics.width) {
           stroke.width = metrics.width;
         }
