@@ -278,16 +278,20 @@
   display: none;
 }
 
-.notedraw-shell.is-drawing-active .notedraw-toolbar {
+.notedraw-shell.is-drawing-active.is-notedraw-controls-visible .notedraw-toolbar {
   display: inline-flex;
 }
 
-.notedraw-body-control.notedraw-toolbar.is-drawing-active {
+.notedraw-body-control.notedraw-toolbar.is-drawing-active.is-notedraw-controls-visible {
   display: inline-flex;
 }
 
 .notedraw-body-control {
   transform: translateZ(0);
+}
+
+.notedraw-body-control:not(.is-notedraw-controls-visible) {
+  display: none !important;
 }
 
 .notedraw-body-control.notedraw-toolbar {
@@ -417,7 +421,8 @@
   overscroll-behavior-x: contain;
 }
 
-.notedraw-format-toolbar.is-visible {
+.notedraw-shell.is-notedraw-controls-visible .notedraw-format-toolbar.is-visible,
+.notedraw-body-control.notedraw-format-toolbar.is-notedraw-controls-visible.is-visible {
   display: inline-flex;
 }
 
@@ -507,12 +512,12 @@
   box-shadow: 0 2px 10px rgba(0, 0, 0, 0.14);
 }
 
-.notedraw-shell.is-drawing-active.is-palette-open .notedraw-palette-panel {
+.notedraw-shell.is-drawing-active.is-notedraw-controls-visible.is-palette-open .notedraw-palette-panel {
   display: grid;
   gap: 8px;
 }
 
-.notedraw-body-control.notedraw-palette-panel.is-drawing-active.is-palette-open {
+.notedraw-body-control.notedraw-palette-panel.is-drawing-active.is-notedraw-controls-visible.is-palette-open {
   display: grid;
   gap: 8px;
 }
@@ -532,12 +537,12 @@
   box-shadow: 0 2px 10px rgba(0, 0, 0, 0.14);
 }
 
-.notedraw-shell.is-drawing-active.is-text-panel-open .notedraw-text-panel {
+.notedraw-shell.is-drawing-active.is-notedraw-controls-visible.is-text-panel-open .notedraw-text-panel {
   display: grid;
   gap: 8px;
 }
 
-.notedraw-body-control.notedraw-text-panel.is-drawing-active.is-text-panel-open {
+.notedraw-body-control.notedraw-text-panel.is-drawing-active.is-notedraw-controls-visible.is-text-panel-open {
   display: grid;
   gap: 8px;
 }
@@ -595,10 +600,6 @@
   border-color: color-mix(in srgb, var(--interactive-accent) 35%, var(--background-modifier-border));
 }
 
-.notedraw-shell.is-notedraw-source-shell .notedraw-text-panel {
-  display: none;
-}
-
 .notedraw-selection-menu {
   position: fixed;
   z-index: 1004;
@@ -614,7 +615,8 @@
   box-shadow: 0 2px 10px rgba(0, 0, 0, 0.16);
 }
 
-.notedraw-selection-menu.is-visible {
+.notedraw-shell.is-notedraw-controls-visible .notedraw-selection-menu.is-visible,
+.notedraw-body-control.notedraw-selection-menu.is-notedraw-controls-visible.is-visible {
   display: inline-flex;
 }
 

@@ -238,12 +238,423 @@ function projectResponsivePoint(point, {
   };
 }
 
-// src/text-layout.mjs
+// src/element-layout.mjs
+var ELEMENT_LAYOUT_BASIS = "note-element-frame-v1";
+var ELEMENT_LAYOUT_VERSION = 1;
+var CORNER_NAMES = ["topLeft", "topRight", "bottomRight", "bottomLeft"];
 function finite2(value, fallback = 0) {
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
 }
 function clamp3(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+function normalizeLine(value) {
+  if (value === null || value === void 0 || value === "") {
+    return null;
+  }
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : null;
+}
+function normalizeFrame(frame = {}) {
+  const surfaceWidth = Math.max(1, finite2(frame.surfaceWidth, frame.width || 1));
+  const contentLeft = clamp3(finite2(frame.contentLeft, frame.left || 0), -surfaceWidth, surfaceWidth * 2);
+  const contentWidth = clamp3(finite2(frame.contentWidth, frame.width || surfaceWidth), 1, surfaceWidth * 2);
+  const viewportHeight = Math.max(1, finite2(frame.viewportHeight, frame.documentHeight || 1));
+  const documentHeight = Math.max(1, finite2(frame.documentHeight, viewportHeight));
+  return {
+    surfaceWidth,
+    contentLeft,
+    contentWidth,
+    viewportHeight,
+    documentHeight,
+    aspectRatio: contentWidth / viewportHeight
+  };
+}
+function normalizeCorner(corner) {
+  if (!corner) {
+    return null;
+  }
+  return {
+    x: clamp3(finite2(corner.x, 0), -2, 3),
+    y: clamp3(finite2(corner.y, 0), 0, 1),
+    path: typeof corner.path === "string" ? corner.path : "",
+    line: normalizeLine(corner.line)
+  };
+}
+function normalizeBox(box = {}) {
+  return {
+    x: finite2(box.x, 0),
+    y: finite2(box.y, 0),
+    width: Math.max(0.01, finite2(box.width, 0.01)),
+    height: Math.max(0.01, finite2(box.height, 0.01))
+  };
+}
+function normalizeMetrics(metrics = {}) {
+  const result = {};
+  for (const key of ["width", "fontSize", "textWidth", "previewWidth", "previewHeight"]) {
+    const value = Number(metrics[key]);
+    if (Number.isFinite(value) && value > 0) {
+      result[key] = value;
+    }
+  }
+  return result;
+}
+function normalizeRelation(relation) {
+  if (!relation || typeof relation.targetId !== "string" || !relation.targetId) {
+    return null;
+  }
+  const kind = ["intersection", "overlap", "near"].includes(relation.kind) ? relation.kind : "near";
+  return {
+    targetId: relation.targetId,
+    kind,
+    sourceCorner: CORNER_NAMES.includes(relation.sourceCorner) ? relation.sourceCorner : "topLeft",
+    targetCorner: CORNER_NAMES.includes(relation.targetCorner) ? relation.targetCorner : "topLeft",
+    dx: finite2(relation.dx, 0),
+    dy: finite2(relation.dy, 0),
+    weight: clamp3(finite2(relation.weight, kind === "near" ? 0.14 : 0.26), 0.05, 0.4)
+  };
+}
+function normalizeElementLayout(layout) {
+  if (!layout || layout.basis !== ELEMENT_LAYOUT_BASIS || !layout.sourceFrame || !layout.box) {
+    return null;
+  }
+  const corners = {};
+  for (const name of CORNER_NAMES) {
+    corners[name] = normalizeCorner(layout.corners?.[name]);
+  }
+  if (!corners.topLeft) {
+    return null;
+  }
+  return {
+    v: ELEMENT_LAYOUT_VERSION,
+    id: typeof layout.id === "string" && layout.id ? layout.id : "",
+    basis: ELEMENT_LAYOUT_BASIS,
+    primary: "topLeft",
+    corners,
+    sourceFrame: normalizeFrame(layout.sourceFrame),
+    box: normalizeBox(layout.box),
+    metrics: normalizeMetrics(layout.metrics),
+    relations: (Array.isArray(layout.relations) ? layout.relations : []).map(normalizeRelation).filter(Boolean).slice(0, 4)
+  };
+}
+function createElementLayout({
+  id,
+  bounds,
+  canvasWidth,
+  canvasHeight,
+  frame,
+  viewportHeight,
+  sourcePath = "",
+  cornerLocations = {},
+  metrics = {},
+  relations = []
+} = {}) {
+  const surfaceWidth = Math.max(1, finite2(canvasWidth, 1));
+  const documentHeight = Math.max(1, finite2(canvasHeight, 1));
+  const sourceFrame = normalizeFrame({
+    surfaceWidth,
+    contentLeft: frame?.left,
+    contentWidth: frame?.width,
+    viewportHeight: viewportHeight || documentHeight,
+    documentHeight
+  });
+  const box = normalizeBox({
+    x: bounds?.minX,
+    y: bounds?.minY,
+    width: finite2(bounds?.maxX, 0) - finite2(bounds?.minX, 0),
+    height: finite2(bounds?.maxY, 0) - finite2(bounds?.minY, 0)
+  });
+  const positions = {
+    topLeft: { x: box.x, y: box.y },
+    topRight: { x: box.x + box.width, y: box.y },
+    bottomRight: { x: box.x + box.width, y: box.y + box.height },
+    bottomLeft: { x: box.x, y: box.y + box.height }
+  };
+  const corners = {};
+  for (const name of CORNER_NAMES) {
+    const location = cornerLocations[name] || {};
+    corners[name] = {
+      x: clamp3((positions[name].x - sourceFrame.contentLeft) / sourceFrame.contentWidth, -2, 3),
+      y: clamp3(positions[name].y / documentHeight, 0, 1),
+      path: typeof location.path === "string" && location.path ? location.path : sourcePath,
+      line: normalizeLine(location.line)
+    };
+  }
+  return normalizeElementLayout({
+    v: ELEMENT_LAYOUT_VERSION,
+    id,
+    basis: ELEMENT_LAYOUT_BASIS,
+    primary: "topLeft",
+    corners,
+    sourceFrame,
+    box,
+    metrics,
+    relations
+  });
+}
+function projectCorner(corner, target, lineToCanvasY) {
+  if (!corner) {
+    return null;
+  }
+  const frame = normalizeFrame(target);
+  const fallbackY = corner.y * frame.documentHeight;
+  const lineY = corner.line !== null && typeof lineToCanvasY === "function" ? Number(lineToCanvasY(corner.path, corner.line)) : NaN;
+  const canUseLine = Number.isFinite(lineY) && (corner.line !== 0 || corner.y <= 0.12 && Math.abs(lineY - fallbackY) <= Math.max(96, frame.documentHeight * 0.08));
+  return {
+    x: frame.contentLeft + corner.x * frame.contentWidth,
+    y: canUseLine ? lineY : fallbackY,
+    lineAnchored: canUseLine
+  };
+}
+function calculateElementScale(sourceFrameInput, targetFrameInput, boxInput = {}) {
+  const source = normalizeFrame(sourceFrameInput);
+  const target = normalizeFrame(targetFrameInput);
+  const box = normalizeBox(boxInput);
+  const widthScale = clamp3(target.contentWidth / source.contentWidth, 0.2, 5);
+  const viewportScale = clamp3(target.viewportHeight / source.viewportHeight, 0.25, 4);
+  const aspectChange = target.aspectRatio / Math.max(0.01, source.aspectRatio);
+  const widthWeight = aspectChange < 0.9 ? 0.8 : aspectChange > 1.35 ? 0.62 : 0.7;
+  let scale = Math.exp(
+    Math.log(widthScale) * widthWeight + Math.log(viewportScale) * (1 - widthWeight)
+  );
+  scale = clamp3(scale, Math.max(0.42, widthScale * 0.58), Math.min(2.4, widthScale * 1.55));
+  const fitScale = target.contentWidth * 0.98 / Math.max(1, box.width);
+  return clamp3(Math.min(scale, fitScale), 0.42, 2.4);
+}
+function projectElementLayout(layoutInput, {
+  canvasWidth,
+  canvasHeight,
+  frame,
+  viewportHeight,
+  lineToCanvasY
+} = {}) {
+  const layout = normalizeElementLayout(layoutInput);
+  if (!layout) {
+    return null;
+  }
+  const targetFrame = normalizeFrame({
+    surfaceWidth: canvasWidth,
+    contentLeft: frame?.left,
+    contentWidth: frame?.width,
+    viewportHeight: viewportHeight || canvasHeight,
+    documentHeight: canvasHeight
+  });
+  const primary = projectCorner(layout.corners.topLeft, targetFrame, lineToCanvasY);
+  if (!primary) {
+    return null;
+  }
+  let scale = calculateElementScale(layout.sourceFrame, targetFrame, layout.box);
+  const projectedRight = projectCorner(layout.corners.topRight, targetFrame, lineToCanvasY);
+  const projectedBottom = projectCorner(layout.corners.bottomLeft, targetFrame, lineToCanvasY);
+  const cornerScales = [];
+  if (projectedRight && layout.box.width > 0.01) {
+    cornerScales.push(Math.abs(projectedRight.x - primary.x) / layout.box.width);
+  }
+  if (projectedBottom?.lineAnchored && primary.lineAnchored && layout.box.height > 0.01) {
+    cornerScales.push(Math.abs(projectedBottom.y - primary.y) / layout.box.height);
+  }
+  const reliableCornerScales = cornerScales.filter((value) => Number.isFinite(value) && value >= scale * 0.45 && value <= scale * 2.2);
+  if (reliableCornerScales.length) {
+    const cornerScale = reliableCornerScales.reduce((sum, value) => sum + value, 0) / reliableCornerScales.length;
+    scale = clamp3(scale * 0.72 + cornerScale * 0.28, scale * 0.72, scale * 1.28);
+  }
+  const width = Math.max(0.01, layout.box.width * scale);
+  const height = Math.max(0.01, layout.box.height * scale);
+  const maxX = Math.max(0, targetFrame.surfaceWidth - width);
+  const maxY = Math.max(0, targetFrame.documentHeight - height);
+  return {
+    id: layout.id,
+    x: clamp3(primary.x, 0, maxX),
+    y: clamp3(primary.y, 0, maxY),
+    width,
+    height,
+    scale,
+    primaryAnchoredToLine: primary.lineAnchored
+  };
+}
+function rectGap(a, b) {
+  const dx = Math.max(0, a.x - (b.x + b.width), b.x - (a.x + a.width));
+  const dy = Math.max(0, a.y - (b.y + b.height), b.y - (a.y + a.height));
+  return Math.hypot(dx, dy);
+}
+function overlapArea(a, b) {
+  const width = Math.max(0, Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x));
+  const height = Math.max(0, Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y));
+  return width * height;
+}
+function boxCorner(box, name) {
+  return {
+    x: box.x + (name === "topRight" || name === "bottomRight" ? box.width : 0),
+    y: box.y + (name === "bottomLeft" || name === "bottomRight" ? box.height : 0)
+  };
+}
+function nearestCornerPair(source, target) {
+  let best = { sourceCorner: "topLeft", targetCorner: "topLeft", distance: Number.POSITIVE_INFINITY };
+  for (const sourceCorner of CORNER_NAMES) {
+    const sourcePoint = boxCorner(source, sourceCorner);
+    for (const targetCorner of CORNER_NAMES) {
+      const targetPoint = boxCorner(target, targetCorner);
+      const distance = Math.hypot(targetPoint.x - sourcePoint.x, targetPoint.y - sourcePoint.y);
+      if (distance < best.distance) {
+        best = { sourceCorner, targetCorner, distance };
+      }
+    }
+  }
+  return best;
+}
+function captureElementRelations(items, { nearDistance = 80, maxRelations = 3 } = {}) {
+  const normalized = (Array.isArray(items) ? items : []).map((item) => ({
+    id: typeof item?.id === "string" ? item.id : "",
+    scale: clamp3(finite2(item?.scale, 1), 0.05, 20),
+    bounds: normalizeBox({
+      x: item?.bounds?.minX ?? item?.bounds?.x,
+      y: item?.bounds?.minY ?? item?.bounds?.y,
+      width: item?.bounds?.width ?? finite2(item?.bounds?.maxX, 0) - finite2(item?.bounds?.minX, 0),
+      height: item?.bounds?.height ?? finite2(item?.bounds?.maxY, 0) - finite2(item?.bounds?.minY, 0)
+    })
+  })).filter((item) => item.id);
+  const cellSize = Math.max(16, finite2(nearDistance, 80));
+  const buckets = /* @__PURE__ */ new Map();
+  const cellRange = (bounds, padding = 0) => ({
+    minX: Math.floor((bounds.x - padding) / cellSize),
+    maxX: Math.floor((bounds.x + bounds.width + padding) / cellSize),
+    minY: Math.floor((bounds.y - padding) / cellSize),
+    maxY: Math.floor((bounds.y + bounds.height + padding) / cellSize)
+  });
+  for (const item of normalized) {
+    const range = cellRange(item.bounds);
+    for (let x = range.minX; x <= range.maxX; x += 1) {
+      for (let y = range.minY; y <= range.maxY; y += 1) {
+        const key = `${x}:${y}`;
+        const bucket = buckets.get(key) || [];
+        bucket.push(item);
+        buckets.set(key, bucket);
+      }
+    }
+  }
+  const relations = /* @__PURE__ */ new Map();
+  for (const source of normalized) {
+    const candidates = [];
+    const nearby = /* @__PURE__ */ new Set();
+    const range = cellRange(source.bounds, nearDistance);
+    for (let x = range.minX; x <= range.maxX; x += 1) {
+      for (let y = range.minY; y <= range.maxY; y += 1) {
+        for (const item of buckets.get(`${x}:${y}`) || []) {
+          nearby.add(item);
+        }
+      }
+    }
+    for (const target of nearby) {
+      if (target === source) {
+        continue;
+      }
+      const overlap = overlapArea(source.bounds, target.bounds);
+      const gap = rectGap(source.bounds, target.bounds);
+      if (overlap <= 0 && gap > nearDistance) {
+        continue;
+      }
+      const kind = overlap > 0 ? "intersection" : "near";
+      const relationScale = Math.max(0.05, (source.scale + target.scale) / 2);
+      const cornerPair = kind === "intersection" ? { sourceCorner: "topLeft", targetCorner: "topLeft" } : nearestCornerPair(source.bounds, target.bounds);
+      const sourceCornerPoint = boxCorner(source.bounds, cornerPair.sourceCorner);
+      const targetCornerPoint = boxCorner(target.bounds, cornerPair.targetCorner);
+      candidates.push({
+        targetId: target.id,
+        kind,
+        sourceCorner: cornerPair.sourceCorner,
+        targetCorner: cornerPair.targetCorner,
+        dx: (targetCornerPoint.x - sourceCornerPoint.x) / relationScale,
+        dy: (targetCornerPoint.y - sourceCornerPoint.y) / relationScale,
+        weight: kind === "intersection" ? 0.28 : 0.14,
+        score: kind === "intersection" ? -overlap - 1 : gap
+      });
+    }
+    candidates.sort((a, b) => a.score - b.score || a.targetId.localeCompare(b.targetId));
+    relations.set(source.id, candidates.slice(0, maxRelations).map(({ score, ...relation }) => relation));
+  }
+  return relations;
+}
+function stabilizeElementRelations(projectedItems, layouts) {
+  const projected = (Array.isArray(projectedItems) ? projectedItems : []).map((item) => ({ ...item }));
+  const byId = new Map(projected.map((item) => [item.id, item]));
+  const layoutsById = layouts instanceof Map ? layouts : new Map((Array.isArray(layouts) ? layouts : []).map((layout) => [layout?.id, layout]));
+  const corrections = /* @__PURE__ */ new Map();
+  for (const source of projected) {
+    const layout = normalizeElementLayout(layoutsById.get(source.id));
+    if (!layout) {
+      continue;
+    }
+    for (const relation of layout.relations) {
+      const target = byId.get(relation.targetId);
+      if (!target) {
+        continue;
+      }
+      const relationScale = (finite2(source.scale, 1) + finite2(target.scale, 1)) / 2;
+      const sourceOffset = boxCorner({ x: 0, y: 0, width: source.width, height: source.height }, relation.sourceCorner);
+      const targetCorner = boxCorner(target, relation.targetCorner);
+      const expectedX = targetCorner.x - relation.dx * relationScale - sourceOffset.x;
+      const expectedY = targetCorner.y - relation.dy * relationScale - sourceOffset.y;
+      const limit = Math.min(28, Math.max(8, Math.min(source.width, source.height) * 0.18));
+      const current = corrections.get(source.id) || { x: 0, y: 0, weight: 0 };
+      current.x += clamp3(expectedX - source.x, -limit, limit) * relation.weight;
+      current.y += clamp3(expectedY - source.y, -limit, limit) * relation.weight;
+      current.weight += relation.weight;
+      corrections.set(source.id, current);
+    }
+  }
+  return projected.map((item) => {
+    const correction = corrections.get(item.id);
+    if (!correction) {
+      return item;
+    }
+    const divisor = Math.max(1, correction.weight);
+    return {
+      ...item,
+      x: item.x + correction.x / divisor,
+      y: item.y + correction.y / divisor
+    };
+  });
+}
+function projectElementPoints(points, layoutInput, projectedBox, { canvasWidth, canvasHeight } = {}) {
+  const layout = normalizeElementLayout(layoutInput);
+  if (!layout || !projectedBox) {
+    return Array.isArray(points) ? points.map((point) => ({ ...point })) : [];
+  }
+  const targetWidth = Math.max(1, finite2(canvasWidth, 1));
+  const targetHeight = Math.max(1, finite2(canvasHeight, 1));
+  const source = layout.sourceFrame;
+  return (Array.isArray(points) ? points : []).map((point) => {
+    const anchor = point?.anchor;
+    const sourceX = anchor && Number.isFinite(Number(anchor.x)) ? source.contentLeft + Number(anchor.x) * source.contentWidth : clamp3(finite2(point?.x, 0), 0, 1) * source.surfaceWidth;
+    const sourceY = anchor && Number.isFinite(Number(anchor.y)) ? Number(anchor.y) * source.documentHeight : clamp3(finite2(point?.y, 0), 0, 1) * source.documentHeight;
+    const localX = (sourceX - layout.box.x) / layout.box.width;
+    const localY = (sourceY - layout.box.y) / layout.box.height;
+    return {
+      ...point,
+      x: clamp3((projectedBox.x + localX * projectedBox.width) / targetWidth, 0, 1),
+      y: clamp3((projectedBox.y + localY * projectedBox.height) / targetHeight, 0, 1)
+    };
+  });
+}
+function scaleElementMetrics(metricsInput, scaleInput) {
+  const metrics = normalizeMetrics(metricsInput);
+  const scale = clamp3(finite2(scaleInput, 1), 0.42, 2.4);
+  return {
+    width: metrics.width ? clamp3(metrics.width * scale, 0.5, 80) : void 0,
+    fontSize: metrics.fontSize ? clamp3(metrics.fontSize * scale, 10, 72) : void 0,
+    textWidth: metrics.textWidth ? clamp3(metrics.textWidth * scale, 24, 900) : void 0,
+    previewWidth: metrics.previewWidth ? clamp3(metrics.previewWidth * scale, 80, 900) : void 0,
+    previewHeight: metrics.previewHeight ? clamp3(metrics.previewHeight * scale, 40, 700) : void 0
+  };
+}
+
+// src/text-layout.mjs
+function finite3(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+function clamp4(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
 function placeFloatingTextEditor({
@@ -260,18 +671,18 @@ function placeFloatingTextEditor({
   margin = 8,
   anchorVisible = true
 } = {}) {
-  const leftEdge = finite2(viewportOffsetLeft) + Math.max(0, finite2(margin, 8));
-  const topEdge = finite2(viewportOffsetTop) + Math.max(0, finite2(margin, 8));
-  const rightEdge = finite2(viewportOffsetLeft) + Math.max(1, finite2(viewportWidth, 1)) - Math.max(0, finite2(margin, 8));
-  const bottomEdge = finite2(viewportOffsetTop) + Math.max(1, finite2(viewportHeight, 1)) - Math.max(0, finite2(margin, 8));
-  const editorWidth = Math.min(Math.max(1, finite2(width, 1)), Math.max(1, rightEdge - leftEdge));
-  const editorHeight = Math.min(Math.max(1, finite2(height, 1)), Math.max(1, bottomEdge - topEdge));
+  const leftEdge = finite3(viewportOffsetLeft) + Math.max(0, finite3(margin, 8));
+  const topEdge = finite3(viewportOffsetTop) + Math.max(0, finite3(margin, 8));
+  const rightEdge = finite3(viewportOffsetLeft) + Math.max(1, finite3(viewportWidth, 1)) - Math.max(0, finite3(margin, 8));
+  const bottomEdge = finite3(viewportOffsetTop) + Math.max(1, finite3(viewportHeight, 1)) - Math.max(0, finite3(margin, 8));
+  const editorWidth = Math.min(Math.max(1, finite3(width, 1)), Math.max(1, rightEdge - leftEdge));
+  const editorHeight = Math.min(Math.max(1, finite3(height, 1)), Math.max(1, bottomEdge - topEdge));
   const centered = !anchorVisible;
-  const desiredLeft = centered ? leftEdge + (rightEdge - leftEdge - editorWidth) / 2 : finite2(anchorX) - Math.max(0, finite2(contentInsetX));
-  const desiredTop = centered ? topEdge + (bottomEdge - topEdge - editorHeight) / 2 : finite2(anchorY) - Math.max(0, finite2(contentInsetY));
+  const desiredLeft = centered ? leftEdge + (rightEdge - leftEdge - editorWidth) / 2 : finite3(anchorX) - Math.max(0, finite3(contentInsetX));
+  const desiredTop = centered ? topEdge + (bottomEdge - topEdge - editorHeight) / 2 : finite3(anchorY) - Math.max(0, finite3(contentInsetY));
   return {
-    left: clamp3(desiredLeft, leftEdge, Math.max(leftEdge, rightEdge - editorWidth)),
-    top: clamp3(desiredTop, topEdge, Math.max(topEdge, bottomEdge - editorHeight)),
+    left: clamp4(desiredLeft, leftEdge, Math.max(leftEdge, rightEdge - editorWidth)),
+    top: clamp4(desiredTop, topEdge, Math.max(topEdge, bottomEdge - editorHeight)),
     width: editorWidth,
     height: editorHeight,
     centered
@@ -295,7 +706,7 @@ function splitOverlongToken(token, maxWidth, measureText) {
   return chunks;
 }
 function wrapTextLines(text, maxWidth, measureText) {
-  const width = Math.max(1, finite2(maxWidth, 1));
+  const width = Math.max(1, finite3(maxWidth, 1));
   const measure = typeof measureText === "function" ? measureText : (value) => String(value || "").length;
   const output = [];
   for (const paragraph of String(text ?? "").replace(/\r\n?/g, "\n").split("\n")) {
@@ -336,14 +747,14 @@ function computeTextLayout({
   padded = false,
   measureText
 } = {}) {
-  const size = clamp3(finite2(fontSize, 18), 10, 72);
-  const measure = typeof measureText === "function" ? (value) => Math.max(0, finite2(measureText(String(value ?? "")), 0)) : (value) => Array.from(String(value ?? "")).length * size * 0.62;
+  const size = clamp4(finite3(fontSize, 18), 10, 72);
+  const measure = typeof measureText === "function" ? (value) => Math.max(0, finite3(measureText(String(value ?? "")), 0)) : (value) => Array.from(String(value ?? "")).length * size * 0.62;
   const paragraphs = String(text ?? "").replace(/\r\n?/g, "\n").split("\n");
   const naturalWidth = Math.max(size, ...paragraphs.map((line) => measure(line)));
-  const availableWidth = Math.max(size, finite2(maxWidth, naturalWidth));
+  const availableWidth = Math.max(size, finite3(maxWidth, naturalWidth));
   const requested = Number(textWidth);
   const hasRequestedWidth = Number.isFinite(requested) && requested > 0;
-  const wrapWidth = clamp3(hasRequestedWidth ? requested : naturalWidth, size, availableWidth);
+  const wrapWidth = clamp4(hasRequestedWidth ? requested : naturalWidth, size, availableWidth);
   const lines = wrapTextLines(text, wrapWidth, measure);
   const measuredWidth = Math.max(size, ...lines.map((line) => measure(line)));
   const contentWidth = hasRequestedWidth ? wrapWidth : Math.min(wrapWidth, measuredWidth);
@@ -1362,10 +1773,16 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
     this.webviewControllers = /* @__PURE__ */ new Map();
     this.headerActions = /* @__PURE__ */ new Map();
     this.saveTimers = /* @__PURE__ */ new Map();
+    this.pendingDrawingSaves = /* @__PURE__ */ new Map();
+    this.drawingWritePromises = /* @__PURE__ */ new Map();
+    this.drawingStateCache = /* @__PURE__ */ new Map();
+    this.viewDrawingActive = /* @__PURE__ */ new WeakMap();
+    this.viewToolbarState = /* @__PURE__ */ new WeakMap();
     this.textSaveStates = /* @__PURE__ */ new WeakMap();
     this.apiListeners = /* @__PURE__ */ new Map();
     this.settingsSaveTimer = null;
     this.webviewSyncTimer = null;
+    this.floatingControlsSyncTimer = null;
     this.webviewMutationObserver = null;
     this.api = this.createPublicApi();
     if (typeof window !== "undefined") {
@@ -1385,6 +1802,7 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
       this.syncMarkdownControllerModes();
       this.syncWebviewControllers();
       for (const controller of this.liveControllers) {
+        controller.syncFloatingControlClasses();
         controller.scheduleLayoutRefresh();
       }
     };
@@ -1433,10 +1851,14 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
     }
     this.headerActions.clear();
     cleanupAllDrawingHeaderButtons();
-    for (const timer of this.saveTimers.values()) {
+    for (const [path, timer] of this.saveTimers.entries()) {
       window.clearTimeout(timer);
+      this.flushDrawingSave(path).catch((error) => {
+        console.error(`[${PLUGIN_ID}] Failed to flush drawing data during unload`, error);
+      });
     }
     this.saveTimers.clear();
+    this.pendingDrawingSaves.clear();
     if (this.settingsSaveTimer !== null) {
       window.clearTimeout(this.settingsSaveTimer);
       this.settingsSaveTimer = null;
@@ -1444,6 +1866,10 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
     if (this.webviewSyncTimer !== null) {
       window.clearTimeout(this.webviewSyncTimer);
       this.webviewSyncTimer = null;
+    }
+    if (this.floatingControlsSyncTimer !== null) {
+      window.clearTimeout(this.floatingControlsSyncTimer);
+      this.floatingControlsSyncTimer = null;
     }
     this.webviewMutationObserver?.disconnect();
     this.webviewMutationObserver = null;
@@ -1504,6 +1930,46 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
       }
     }
   }
+  controllerActivationState(controller) {
+    const key = this.controllerStateKey(controller);
+    return key ? Boolean(this.viewDrawingActive.get(key)) : false;
+  }
+  controllerStateKey(controller) {
+    const view = controller?.view;
+    return view?.leaf || findOwningLeaf(this.app, view?.containerEl || controller?.previewEl) || view || controller?.previewEl || null;
+  }
+  controllerToolbarState(controller) {
+    const key = this.controllerStateKey(controller);
+    return key ? this.viewToolbarState.get(key) || null : null;
+  }
+  setControllerToolbarState(controller, state) {
+    const key = this.controllerStateKey(controller);
+    if (!key) {
+      return;
+    }
+    const next = {
+      ...this.viewToolbarState.get(key) || {},
+      ...state
+    };
+    this.viewToolbarState.set(key, next);
+    for (const candidate of this.liveControllers) {
+      if (!candidate.destroyed && candidate !== controller && this.controllerStateKey(candidate) === key) {
+        candidate.applySharedToolbarState(next);
+      }
+    }
+  }
+  setControllerActivation(controller, active) {
+    const key = this.controllerStateKey(controller);
+    if (key) {
+      this.viewDrawingActive.set(key, Boolean(active));
+    }
+    for (const candidate of this.liveControllers) {
+      const candidateKey = this.controllerStateKey(candidate);
+      if (!candidate.destroyed && candidateKey === key) {
+        candidate.applyActiveState(Boolean(active));
+      }
+    }
+  }
   installWebviewObserver() {
     if (typeof MutationObserver === "undefined" || !activeDocument?.body) {
       return;
@@ -1512,6 +1978,9 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
       if (mutations.some((mutation) => isWebviewSyncMutation(mutation))) {
         this.scheduleWebviewSync();
       }
+      if (mutations.some((mutation) => isFloatingControlsVisibilityMutation(mutation))) {
+        this.scheduleFloatingControlsSync();
+      }
     });
     this.webviewMutationObserver.observe(activeDocument.body, {
       subtree: true,
@@ -1519,6 +1988,17 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
       attributes: true,
       attributeFilter: ["data-url", "src", "class"]
     });
+  }
+  scheduleFloatingControlsSync() {
+    if (this.floatingControlsSyncTimer !== null) {
+      return;
+    }
+    this.floatingControlsSyncTimer = window.setTimeout(() => {
+      this.floatingControlsSyncTimer = null;
+      for (const controller of this.liveControllers) {
+        controller.syncFloatingControlClasses();
+      }
+    }, 40);
   }
   scheduleWebviewSync() {
     if (this.webviewSyncTimer !== null) {
@@ -1532,6 +2012,7 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
   createPublicApi() {
     const capabilities = Object.freeze({
       responsiveCoordinates: RESPONSIVE_POINT_BASIS,
+      responsiveElements: ELEMENT_LAYOUT_BASIS,
       embeddedMarkdownEditing: true,
       readingViewEditing: true,
       sourceViewEditing: true,
@@ -1587,7 +2068,7 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
       on: (eventName, listener) => this.onApiEvent(eventName, listener)
     };
     return {
-      version: "3.1.40",
+      version: "3.1.41",
       apiVersion: v1.apiVersion,
       capabilities,
       v1,
@@ -1695,10 +2176,10 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
     }
     return data;
   }
-  refreshControllersForFile(file, data) {
+  refreshControllersForFile(file, data, options = {}) {
     let refreshed = 0;
     for (const controller of this.getAllControllers()) {
-      if (normalizeVaultPath(controller.file?.path) !== normalizeVaultPath(file?.path) || controller.pointerDown || controller.draggingStroke || controller.resizingSelection) {
+      if (normalizeVaultPath(controller.file?.path) !== normalizeVaultPath(file?.path) || controller.drawingData === options.excludeData || controller.pointerDown || controller.draggingStroke || controller.resizingSelection) {
         continue;
       }
       controller.drawingData = normalizeDrawingData(data, file);
@@ -1707,8 +2188,10 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
       controller.responsiveLayoutSignature = "";
       controller.responsiveLayoutContext = null;
       controller.invalidateStaticCache();
-      controller.resizeCanvas();
-      controller.render();
+      if (isElementVisibleEnough(controller.previewEl)) {
+        controller.resizeCanvas();
+        controller.render();
+      }
       refreshed += 1;
     }
     return refreshed;
@@ -1845,11 +2328,7 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
         previewController?.destroy();
         continue;
       }
-      if (previewVisible && sourceController?.active) {
-        sourceController.toggle().catch((error) => {
-          console.error(`[${PLUGIN_ID}] Failed to close source NoteDraw controller`, error);
-        });
-      }
+      sourceController?.syncFloatingControlClasses();
       if (previewVisible && (!previewController || previewController.destroyed || previewController.file?.path !== view.file?.path)) {
         previewController?.destroy();
         previewController = this.resolveLivePreviewController(view);
@@ -2174,16 +2653,24 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
     const path = this.drawingPathForFile(file);
     const legacyPath = this.legacyDrawingPathForFile(file);
     const adapter = this.app.vault.adapter;
+    const cached = this.drawingStateCache.get(path);
+    if (cached) {
+      return normalizeDrawingData(cached, file);
+    }
     try {
       if (await adapter.exists(path)) {
-        return normalizeDrawingData(JSON.parse(await adapter.read(path)), file);
+        const data = normalizeDrawingData(JSON.parse(await adapter.read(path)), file);
+        this.drawingStateCache.set(path, normalizeDrawingData(data, file));
+        return data;
       }
       if (await adapter.exists(legacyPath)) {
         const migrated = normalizeDrawingData(JSON.parse(await adapter.read(legacyPath)), file);
         await this.writeDrawings(file, migrated);
         return migrated;
       }
-      return createEmptyDrawingData(file);
+      const empty = createEmptyDrawingData(file);
+      this.drawingStateCache.set(path, normalizeDrawingData(empty, file));
+      return empty;
     } catch (error) {
       console.error(`[${PLUGIN_ID}] Failed to read drawing file`, error);
       return createEmptyDrawingData(file);
@@ -2191,34 +2678,71 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
   }
   scheduleDrawingSave(file, data) {
     const path = this.drawingPathForFile(file);
+    const canonical = normalizeDrawingData(data, file);
+    this.drawingStateCache.set(path, canonical);
+    this.pendingDrawingSaves.set(path, file);
+    this.refreshControllersForFile(file, canonical, { excludeData: data });
     const previous = this.saveTimers.get(path);
     if (previous) {
       window.clearTimeout(previous);
     }
     const timer = window.setTimeout(() => {
       this.saveTimers.delete(path);
-      compactDrawingData(data, this.noteDrawSettings?.drawingCompactDistance ?? DEFAULT_SETTINGS.drawingCompactDistance);
-      this.writeDrawings(file, data).catch((error) => {
+      this.flushDrawingSave(path).catch((error) => {
         console.error(`[${PLUGIN_ID}] Failed to save drawing file`, error);
         new import_obsidian.Notice(this.t("failedSaveDrawing"));
       });
     }, this.noteDrawSettings?.autoSaveDelayMs ?? DEFAULT_SETTINGS.autoSaveDelayMs);
     this.saveTimers.set(path, timer);
   }
-  async writeDrawings(file, data) {
+  async flushDrawingSave(path) {
+    const file = this.pendingDrawingSaves.get(path);
+    const latest = this.drawingStateCache.get(path);
+    if (!file) {
+      return;
+    }
+    this.pendingDrawingSaves.delete(path);
+    const previousWrite = this.drawingWritePromises.get(path) || Promise.resolve();
+    const write = previousWrite.catch(() => void 0).then(async () => {
+      if (!latest) {
+        return;
+      }
+      const compacted = normalizeDrawingData(latest, file);
+      compactDrawingData(compacted, this.noteDrawSettings?.drawingCompactDistance ?? DEFAULT_SETTINGS.drawingCompactDistance);
+      await this.writeDrawings(file, compacted, { refresh: false, updateCache: false });
+    });
+    this.drawingWritePromises.set(path, write);
+    try {
+      await write;
+    } finally {
+      if (this.drawingWritePromises.get(path) === write) {
+        this.drawingWritePromises.delete(path);
+      }
+    }
+  }
+  async writeDrawings(file, data, options = {}) {
     await this.ensureDrawingDir();
     const path = this.drawingPathForFile(file);
+    const normalized = normalizeDrawingData(data, file);
+    const updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+    normalized.updatedAt = updatedAt;
+    if (options.updateCache !== false) {
+      this.drawingStateCache.set(path, normalizeDrawingData(normalized, file));
+    }
     const body = JSON.stringify({
-      ...data,
+      ...normalized,
       sourcePath: file.path,
-      updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+      updatedAt
     }, null, 2);
     await this.app.vault.adapter.write(path, body);
+    if (options.refresh !== false) {
+      this.refreshControllersForFile(file, normalized, { excludeData: data });
+    }
     this.emitApiEvent("drawings-changed", {
       file: file.path,
       storagePath: path,
-      strokeCount: Array.isArray(data?.strokes) ? data.strokes.length : 0,
-      updatedAt: data?.updatedAt || null
+      strokeCount: normalized.strokes.length,
+      updatedAt
     });
   }
   async injectExportSnapshot(file, container) {
@@ -2300,7 +2824,7 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
     canvas.className = "notedraw-export-image-canvas";
     canvas.width = Math.ceil(boxWidth * scale);
     canvas.height = Math.ceil(boxHeight * scale);
-    const opacity = clamp4(Number(stroke.opacity ?? 1), 0, 1);
+    const opacity = clamp5(Number(stroke.opacity ?? 1), 0, 1);
     canvas.dataset.notedrawAssetPath = stroke.assetPath || "";
     canvas.dataset.notedrawAssetName = stroke.assetName || "";
     canvas.dataset.notedrawAssetMime = stroke.assetMime || "";
@@ -2576,9 +3100,9 @@ var PreviewDrawingController = class {
     this.destroyed = false;
     this.plugin.liveControllers?.add(this);
     this.runtimeSettings = sanitizeSettings(this.plugin?.noteDrawSettings || {});
-    this.active = false;
+    this.active = this.plugin.controllerActivationState(this);
     this.drawingData = {
-      version: 2,
+      version: 3,
       sourcePath: file.path,
       strokes: [],
       updatedAt: null
@@ -2659,6 +3183,21 @@ var PreviewDrawingController = class {
     this.floatingControlsInBody = false;
     this.textPreset = "plain";
     this.pendingEmbedTool = null;
+    const sharedToolbarState = this.plugin.controllerToolbarState(this);
+    if (sharedToolbarState) {
+      this.brushMode = [BRUSH_PEN, BRUSH_WATERCOLOR].includes(sharedToolbarState.brushMode) ? sharedToolbarState.brushMode : this.brushMode;
+      this.toolMode = sharedToolbarState.toolMode || this.toolMode;
+      this.drawingsVisible = sharedToolbarState.drawingsVisible !== false;
+      this.paletteOpen = Boolean(sharedToolbarState.paletteOpen);
+      this.textPanelOpen = Boolean(sharedToolbarState.textPanelOpen);
+      this.textPreset = sharedToolbarState.textPreset || this.textPreset;
+      for (const mode of [BRUSH_PEN, BRUSH_WATERCOLOR]) {
+        if (sharedToolbarState.brushSettings?.[mode]) {
+          this.brushSettings[mode] = { ...this.brushSettings[mode], ...sharedToolbarState.brushSettings[mode] };
+        }
+      }
+      this.syncCurrentBrushFields();
+    }
     this.lastTextTap = null;
     this.embedLayer = null;
     this.embedNodes = /* @__PURE__ */ new Map();
@@ -2740,20 +3279,18 @@ var PreviewDrawingController = class {
     });
     (0, import_obsidian.setIcon)(this.watercolorButton, "paintbrush");
     this.watercolorButton.addEventListener("click", () => this.setBrushMode(BRUSH_WATERCOLOR));
-    if (this.surfaceType !== "source") {
-      this.textButton = this.toolbar.createEl("button", {
-        attr: { type: "button", title: this.plugin.t("floatingText") }
-      });
-      (0, import_obsidian.setIcon)(this.textButton, "type");
-      this.textButton.addEventListener("click", (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        this.textPreset = "plain";
-        this.setTextMode();
-        this.setTextPanelOpen(true);
-        this.syncTextPanelButtons();
-      });
-    }
+    this.textButton = this.toolbar.createEl("button", {
+      attr: { type: "button", title: this.plugin.t("floatingText") }
+    });
+    (0, import_obsidian.setIcon)(this.textButton, "type");
+    this.textButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      this.textPreset = "plain";
+      this.setTextMode();
+      this.setTextPanelOpen(true);
+      this.syncTextPanelButtons();
+    });
     this.undoButton = this.toolbar.createEl("button", {
       attr: { type: "button", title: this.plugin.t("undoLastDrawing") }
     });
@@ -2784,10 +3321,8 @@ var PreviewDrawingController = class {
     });
     this.palettePanel = createNoteDrawControlElement(this.floatingControlsHost, "notedraw-palette-panel");
     this.createColorPalette();
-    if (this.surfaceType !== "source") {
-      this.textPanel = createNoteDrawControlElement(this.floatingControlsHost, "notedraw-text-panel");
-      this.createTextPanel();
-    }
+    this.textPanel = createNoteDrawControlElement(this.floatingControlsHost, "notedraw-text-panel");
+    this.createTextPanel();
     this.selectionMenu = createNoteDrawControlElement(this.floatingControlsHost, "notedraw-selection-menu");
     this.createSelectionMenu();
     if (this.allowTextEdit && this.surfaceType !== "webview") {
@@ -2808,6 +3343,7 @@ var PreviewDrawingController = class {
       this.syncColorSwatches();
       this.updateToolButtons();
       this.persistCurrentBrushSettings();
+      this.syncSharedToolbarState();
     });
     this.hiddenFileInput = this.floatingControlsHost.createEl("input", {
       cls: "notedraw-file-input",
@@ -2838,10 +3374,11 @@ var PreviewDrawingController = class {
       title: this.plugin.t("penWidth")
     });
     this.widthInput.addEventListener("input", () => {
-      this.currentBrushSettings().width = clamp4(Number(this.widthInput.value), MIN_BRUSH_WIDTH, MAX_BRUSH_WIDTH);
+      this.currentBrushSettings().width = clamp5(Number(this.widthInput.value), MIN_BRUSH_WIDTH, MAX_BRUSH_WIDTH);
       this.syncCurrentBrushFields();
       this.updateToolButtons();
       this.persistCurrentBrushSettings();
+      this.syncSharedToolbarState();
     });
     this.opacityInput = this.createPaletteInput("droplets", "opacity", {
       type: "range",
@@ -2852,10 +3389,11 @@ var PreviewDrawingController = class {
       title: this.plugin.t("penOpacity")
     });
     this.opacityInput.addEventListener("input", () => {
-      this.currentBrushSettings().opacity = clamp4(Number(this.opacityInput.value), 0, 1);
+      this.currentBrushSettings().opacity = clamp5(Number(this.opacityInput.value), 0, 1);
       this.syncCurrentBrushFields();
       this.updateToolButtons();
       this.persistCurrentBrushSettings();
+      this.syncSharedToolbarState();
     });
     this.embedLayer = this.previewEl.createDiv({ cls: "notedraw-embed-layer" });
     this.staticCanvas.classList.add("notedraw-static-canvas");
@@ -2896,6 +3434,8 @@ var PreviewDrawingController = class {
     this.updateToolButtons();
     this.syncPaletteInputs();
     this.refreshLocalizedLabels();
+    this.applySharedToolbarState(this.plugin.controllerToolbarState(this));
+    this.applyActiveState(this.active);
   }
   applySettings() {
     const settings = sanitizeSettings(this.plugin?.noteDrawSettings || {});
@@ -3125,6 +3665,7 @@ var PreviewDrawingController = class {
     this.canvas?.remove();
     this.previewEl.removeClass("notedraw-shell");
     this.previewEl.removeClass("is-notedraw-responsive-layout");
+    this.previewEl.removeClass("is-notedraw-controls-visible");
     this.previewEl.removeClass("is-drawing-active");
     this.previewEl.removeClass("is-drawing-hidden");
     this.previewEl.removeClass("is-select-mode");
@@ -3158,11 +3699,18 @@ var PreviewDrawingController = class {
     if (this.destroyed) {
       return;
     }
-    this.active = !this.active;
+    this.plugin.setControllerActivation(this, !this.active);
+  }
+  applyActiveState(active) {
+    if (this.destroyed) {
+      return;
+    }
+    const wasActive = this.active;
+    this.active = Boolean(active);
     this.previewEl.toggleClass("is-drawing-active", this.active);
     this.syncFloatingControlClasses();
     this.button?.classList.toggle("is-active", this.active);
-    if (!this.active) {
+    if (!this.active && wasActive) {
       this.endTextEdit();
       this.endFloatingTextInput(false);
       this.setPaletteOpen(false);
@@ -3172,16 +3720,30 @@ var PreviewDrawingController = class {
       this.cancelCurrentStroke();
       this.cancelSelectionDrag(true);
       this.cancelSelectedStrokeDrag(true);
-    } else {
+    } else if (this.active && (!wasActive || !this.drawingsLoaded)) {
       this.ensureDrawingsLoaded().catch((error) => {
         console.error(`[${PLUGIN_ID}] Failed to load drawings`, error);
       });
       this.scheduleLayoutRefresh();
     }
   }
+  controlsShouldBeVisible() {
+    if (!this.active || this.destroyed || !this.previewEl?.isConnected || isBlockingObsidianOverlayOpen(activeDocument)) {
+      return false;
+    }
+    const activeLeaf = this.plugin.app.workspace?.activeLeaf;
+    const ownerLeaf = this.view?.leaf || findOwningLeaf(this.plugin.app, this.view?.containerEl || this.previewEl);
+    if (activeLeaf && ownerLeaf && activeLeaf !== ownerLeaf) {
+      return false;
+    }
+    return isElementVisibleEnough(this.previewEl);
+  }
   syncFloatingControlClasses() {
+    const visible = this.controlsShouldBeVisible();
+    this.previewEl?.toggleClass("is-notedraw-controls-visible", visible);
     for (const element of [this.toolbar, this.palettePanel, this.textPanel, this.selectionMenu, this.formatToolbar]) {
       element?.toggleClass("is-drawing-active", Boolean(this.active));
+      element?.toggleClass("is-notedraw-controls-visible", visible);
       element?.toggleClass("is-palette-open", Boolean(this.paletteOpen));
       element?.toggleClass("is-text-panel-open", Boolean(this.textPanelOpen));
       element?.toggleClass("is-selection-menu-open", Boolean(this.selectionMenuOpen));
@@ -3207,11 +3769,13 @@ var PreviewDrawingController = class {
     await this.loadingDrawings;
   }
   onResize() {
+    this.syncFloatingControlClasses();
     if (this.active || this.drawingsLoaded || this.ctx) {
       this.scheduleResize();
     }
   }
   onScroll() {
+    this.syncFloatingControlClasses();
     this.scheduleFloatingControlsPosition();
     if (this.active || this.drawingsLoaded || this.ctx) {
       this.scheduleResize();
@@ -3300,6 +3864,7 @@ var PreviewDrawingController = class {
     }, 120);
   }
   updateFloatingControlsPosition() {
+    this.syncFloatingControlClasses();
     if (!this.button || !this.toolbar) {
       return;
     }
@@ -3323,12 +3888,12 @@ var PreviewDrawingController = class {
       headerBottom
     );
     const compactViewport = isMobileRuntime() || viewportWidth < 640;
-    const right = compactViewport ? 8 : clamp4(viewportRight - anchorRight + 10, 8, Math.max(8, viewportWidth - 48));
+    const right = compactViewport ? 8 : clamp5(viewportRight - anchorRight + 10, 8, Math.max(8, viewportWidth - 48));
     const left = compactViewport ? viewportLeft + 8 : "auto";
     const minTop = Math.max(viewportTop + 8, headerBottom + 6);
     const maxTop = Math.max(minTop, viewportTop + viewportHeight - toolbarHeight - 8);
     const topOffset = sanitizeSettings(this.plugin?.noteDrawSettings || {}).toolbarTopOffset;
-    const top = clamp4(anchorBottom + topOffset, minTop, maxTop);
+    const top = clamp5(anchorBottom + topOffset, minTop, maxTop);
     const props = {
       "--notedraw-toolbar-right": `${Math.round(right)}px`,
       "--notedraw-toolbar-left": typeof left === "number" ? `${Math.round(left)}px` : left,
@@ -3357,6 +3922,7 @@ var PreviewDrawingController = class {
     this.syncCurrentBrushFields();
     this.syncPaletteInputs();
     this.updateToolButtons();
+    this.syncSharedToolbarState();
     this.render();
   }
   setTextMode() {
@@ -3369,6 +3935,7 @@ var PreviewDrawingController = class {
     this.cancelCurrentStroke();
     this.cancelSelectionDrag(true);
     this.updateToolButtons();
+    this.syncSharedToolbarState();
     this.render();
   }
   setEditMarkdownMode() {
@@ -3383,7 +3950,50 @@ var PreviewDrawingController = class {
     this.cancelCurrentStroke();
     this.cancelSelectionDrag(true);
     this.updateToolButtons();
+    this.syncSharedToolbarState();
     this.render();
+  }
+  syncSharedToolbarState() {
+    this.plugin.setControllerToolbarState(this, {
+      brushMode: this.brushMode,
+      brushSettings: {
+        [BRUSH_PEN]: { ...this.brushSettings[BRUSH_PEN] },
+        [BRUSH_WATERCOLOR]: { ...this.brushSettings[BRUSH_WATERCOLOR] }
+      },
+      toolMode: this.toolMode,
+      drawingsVisible: this.drawingsVisible,
+      paletteOpen: this.paletteOpen,
+      textPanelOpen: this.textPanelOpen,
+      textPreset: this.textPreset
+    });
+  }
+  applySharedToolbarState(state) {
+    if (!state || this.destroyed) {
+      return;
+    }
+    this.brushMode = [BRUSH_PEN, BRUSH_WATERCOLOR].includes(state.brushMode) ? state.brushMode : this.brushMode;
+    for (const mode of [BRUSH_PEN, BRUSH_WATERCOLOR]) {
+      if (state.brushSettings?.[mode]) {
+        this.brushSettings[mode] = { ...this.brushSettings[mode], ...state.brushSettings[mode] };
+      }
+    }
+    this.toolMode = state.toolMode || this.toolMode;
+    this.drawingsVisible = state.drawingsVisible !== false;
+    this.paletteOpen = Boolean(state.paletteOpen) && this.toolMode !== TOOL_SELECT && this.toolMode !== TOOL_EDIT_MD;
+    this.textPanelOpen = Boolean(state.textPanelOpen);
+    this.textPreset = state.textPreset || this.textPreset;
+    this.syncCurrentBrushFields();
+    this.previewEl.toggleClass("is-select-mode", this.toolMode === TOOL_SELECT);
+    this.previewEl.toggleClass("is-drawing-hidden", !this.drawingsVisible);
+    this.previewEl.toggleClass("is-palette-open", this.paletteOpen);
+    this.previewEl.toggleClass("is-text-panel-open", this.textPanelOpen);
+    this.syncPaletteInputs();
+    this.syncTextPanelButtons?.();
+    this.updateToolButtons();
+    this.syncFloatingControlClasses();
+    if (this.ctx || this.drawingsLoaded) {
+      this.render();
+    }
   }
   setToolFromApi(tool, options = {}) {
     const normalized = String(tool || "").trim().toLowerCase();
@@ -3398,9 +4008,6 @@ var PreviewDrawingController = class {
       return true;
     }
     if (normalized === TOOL_TEXT) {
-      if (this.surfaceType === "source") {
-        return false;
-      }
       this.textPreset = String(options.preset || "plain");
       this.setTextMode();
       return true;
@@ -3459,7 +4066,7 @@ var PreviewDrawingController = class {
     this.applyBrushButtonState(this.watercolorButton, this.brushSettings?.[BRUSH_WATERCOLOR], watercolorActive);
     this.editMarkdownButton?.classList.toggle("is-active", this.toolMode === TOOL_EDIT_MD);
     this.textButton?.classList.toggle("is-active", this.toolMode === TOOL_TEXT || this.textPanelOpen);
-    this.textButton?.toggleAttribute("hidden", this.surfaceType === "source");
+    this.textButton?.toggleAttribute("hidden", false);
     this.selectButton?.classList.toggle("is-active", this.toolMode === TOOL_SELECT);
     this.paletteButton?.toggleAttribute("disabled", this.toolMode === TOOL_SELECT || this.toolMode === TOOL_EDIT_MD);
     this.previewEl.toggleClass("is-watercolor-mode", this.toolMode === TOOL_DRAW && this.brushMode === BRUSH_WATERCOLOR);
@@ -3526,6 +4133,7 @@ var PreviewDrawingController = class {
           this.setTextMode();
           this.setTextPanelOpen(false);
           this.syncTextPanelButtons();
+          this.syncSharedToolbarState();
         });
       }
     }
@@ -3590,8 +4198,8 @@ var PreviewDrawingController = class {
     const viewportLeft = viewport?.offsetLeft || 0;
     const viewportWidth = Math.max(160, viewport?.width || window.innerWidth || 160);
     const viewportHeight = Math.max(120, viewport?.height || window.innerHeight || 120);
-    const left = clamp4(Math.round(x - width / 2), viewportLeft + 8, Math.max(viewportLeft + 8, viewportLeft + viewportWidth - width - 8));
-    const top = clamp4(Math.round(y - height - 14), viewportTop + 8, Math.max(viewportTop + 8, viewportTop + viewportHeight - height - 8));
+    const left = clamp5(Math.round(x - width / 2), viewportLeft + 8, Math.max(viewportLeft + 8, viewportLeft + viewportWidth - width - 8));
+    const top = clamp5(Math.round(y - height - 14), viewportTop + 8, Math.max(viewportTop + 8, viewportTop + viewportHeight - height - 8));
     setNoteDrawCssProps(this.selectionMenu, {
       "--notedraw-selection-menu-left": `${left}px`,
       "--notedraw-selection-menu-top": `${top}px`
@@ -3756,10 +4364,10 @@ var PreviewDrawingController = class {
     const maxTop = Math.max(minTop, viewportTop + viewportHeight - height - 8);
     const gap = 14;
     const preferredLeft = rect.left + rect.width / 2 - width / 2;
-    const left = clamp4(Math.round(preferredLeft), viewportLeft + 8, Math.max(viewportLeft + 8, viewportLeft + viewportWidth - width - 8));
+    const left = clamp5(Math.round(preferredLeft), viewportLeft + 8, Math.max(viewportLeft + 8, viewportLeft + viewportWidth - width - 8));
     if (this.formatToolbarManualPosition) {
-      const top2 = clamp4(Math.round(this.formatToolbarManualPosition.top), minTop, maxTop);
-      const manualLeft = clamp4(Math.round(this.formatToolbarManualPosition.left), viewportLeft + 8, Math.max(viewportLeft + 8, viewportLeft + viewportWidth - width - 8));
+      const top2 = clamp5(Math.round(this.formatToolbarManualPosition.top), minTop, maxTop);
+      const manualLeft = clamp5(Math.round(this.formatToolbarManualPosition.left), viewportLeft + 8, Math.max(viewportLeft + 8, viewportLeft + viewportWidth - width - 8));
       this.formatToolbarManualPosition = { top: top2, left: manualLeft };
       setNoteDrawCssProps(this.formatToolbar, {
         "--notedraw-format-top": `${top2}px`,
@@ -3771,7 +4379,7 @@ var PreviewDrawingController = class {
     const belowOneLine = rect.bottom + gap + lineStep;
     const above = rect.top - height - gap;
     const below = rect.bottom + gap;
-    const top = belowOneLine <= maxTop ? belowOneLine : below <= maxTop ? below : above >= minTop ? above : clamp4(Math.round(belowOneLine), minTop, maxTop);
+    const top = belowOneLine <= maxTop ? belowOneLine : below <= maxTop ? below : above >= minTop ? above : clamp5(Math.round(belowOneLine), minTop, maxTop);
     setNoteDrawCssProps(this.formatToolbar, {
       "--notedraw-format-top": `${top}px`,
       "--notedraw-format-left": `${left}px`
@@ -3809,12 +4417,12 @@ var PreviewDrawingController = class {
     const viewportLeft = viewport?.offsetLeft || 0;
     const viewportHeight = Math.max(120, viewport?.height || window.innerHeight || 120);
     const viewportWidth = Math.max(160, viewport?.width || window.innerWidth || 160);
-    const top = clamp4(
+    const top = clamp5(
       this.formatToolbarDrag.startTop + event.clientY - this.formatToolbarDrag.startY,
       viewportTop + 8,
       Math.max(viewportTop + 8, viewportTop + viewportHeight - toolbarRect.height - 8)
     );
-    const left = clamp4(
+    const left = clamp5(
       this.formatToolbarDrag.startLeft + event.clientX - this.formatToolbarDrag.startX,
       viewportLeft + 8,
       Math.max(viewportLeft + 8, viewportLeft + viewportWidth - toolbarRect.width - 8)
@@ -3962,13 +4570,10 @@ var PreviewDrawingController = class {
     }
   }
   toggleTextPanel() {
-    if (this.surfaceType === "source") {
-      return;
-    }
     this.setTextPanelOpen(!this.textPanelOpen);
   }
   setTextPanelOpen(open) {
-    this.textPanelOpen = Boolean(open) && this.surfaceType !== "source";
+    this.textPanelOpen = Boolean(open);
     this.previewEl.toggleClass("is-text-panel-open", this.textPanelOpen);
     this.syncFloatingControlClasses();
     this.textButton?.classList.toggle("is-active", this.toolMode === TOOL_TEXT || this.textPanelOpen);
@@ -3977,6 +4582,7 @@ var PreviewDrawingController = class {
       this.updateFloatingControlsPosition();
       this.syncTextPanelButtons();
     }
+    this.syncSharedToolbarState();
   }
   createColorPalette() {
     const row = this.palettePanel.createDiv({ cls: "notedraw-palette-row notedraw-color-row" });
@@ -4024,6 +4630,7 @@ var PreviewDrawingController = class {
     this.syncPaletteInputs();
     this.updateToolButtons();
     this.persistCurrentBrushSettings();
+    this.syncSharedToolbarState();
   }
   syncColorSwatches() {
     if (!this.colorSwatchButtons?.length) {
@@ -4065,6 +4672,7 @@ var PreviewDrawingController = class {
     this.endTextEdit();
     this.cancelCurrentStroke();
     this.cancelSelectionDrag(true);
+    this.syncSharedToolbarState();
     this.render();
   }
   togglePalettePanel() {
@@ -4085,6 +4693,7 @@ var PreviewDrawingController = class {
     if (this.paletteOpen) {
       this.updateFloatingControlsPosition();
     }
+    this.syncSharedToolbarState();
   }
   onDocumentPointerDown(event) {
     if (!this.paletteOpen && !this.textPanelOpen && !this.selectionMenuOpen && !this.currentEditor) {
@@ -4162,6 +4771,7 @@ var PreviewDrawingController = class {
       this.button,
       this.surfaceType === "webview" ? "editWebviewDraw" : this.drawingsVisible ? "editTextDraw" : "editTextDrawHidden"
     );
+    this.syncSharedToolbarState();
   }
   getResponsiveContentFrame() {
     return measureResponsiveContentFrame(this.previewEl, this.surfaceType, this.canvasWidth(), this.canvas);
@@ -4172,6 +4782,7 @@ var PreviewDrawingController = class {
     }
     this.responsiveLayoutContext = {
       frame: this.getResponsiveContentFrame(),
+      viewportHeight: measureResponsiveViewportHeight(this.previewEl, this.scrollContainer),
       lineAnchors: collectRenderedLineAnchors(this.previewEl, this.canvas, this.canvasWindowTop),
       codeMirror: this.surfaceType === "source" ? getCodeMirrorView(this.view, this.previewEl) : null
     };
@@ -4208,8 +4819,8 @@ var PreviewDrawingController = class {
     return clientY - this.canvas.getBoundingClientRect().top + this.canvasWindowTop;
   }
   captureResponsivePoint(point, context = this.getResponsiveLayoutContext()) {
-    const canvasX = clamp4(Number(point?.x || 0), 0, 1) * this.canvasWidth();
-    const canvasY = clamp4(Number(point?.y || 0), 0, 1) * this.canvasHeight();
+    const canvasX = clamp5(Number(point?.x || 0), 0, 1) * this.canvasWidth();
+    const canvasY = clamp5(Number(point?.y || 0), 0, 1) * this.canvasHeight();
     const lineLocation = this.captureLineLocation(canvasX, canvasY, context);
     return {
       ...point,
@@ -4231,28 +4842,151 @@ var PreviewDrawingController = class {
       const stroke = this.drawingData?.strokes?.[index];
       if (stroke?.points?.length) {
         stroke.points = stroke.points.map((point) => this.captureResponsivePoint(point, context));
+        this.captureElementLayoutForStroke(stroke, context, index);
+      }
+    }
+    this.rebuildElementRelations();
+  }
+  captureElementLayoutForStroke(stroke, context = this.getResponsiveLayoutContext(), index = -1) {
+    const bounds = getStrokeBounds(stroke, this.canvasWidth(), this.canvasHeight());
+    if (!bounds) {
+      return null;
+    }
+    const cornerPoints = {
+      topLeft: { x: bounds.minX, y: bounds.minY },
+      topRight: { x: bounds.maxX, y: bounds.minY },
+      bottomRight: { x: bounds.maxX, y: bounds.maxY },
+      bottomLeft: { x: bounds.minX, y: bounds.maxY }
+    };
+    const cornerLocations = Object.fromEntries(Object.entries(cornerPoints).map(([name, point]) => [
+      name,
+      this.captureLineLocation(point.x, point.y, context) || { path: this.file?.path || "", line: null }
+    ]));
+    const previous = normalizeElementLayout(stroke.layout);
+    stroke.layout = createElementLayout({
+      id: previous?.id || createElementLayoutId(index),
+      bounds,
+      canvasWidth: this.canvasWidth(),
+      canvasHeight: this.canvasHeight(),
+      frame: context.frame,
+      viewportHeight: context.viewportHeight,
+      sourcePath: this.file?.path || "",
+      cornerLocations,
+      metrics: {
+        width: stroke.width,
+        fontSize: stroke.fontSize,
+        textWidth: stroke.textWidth,
+        previewWidth: stroke.previewWidth,
+        previewHeight: stroke.previewHeight
+      },
+      relations: previous?.relations || []
+    });
+    return stroke.layout;
+  }
+  rebuildElementRelations() {
+    const items = [];
+    const layoutsById = /* @__PURE__ */ new Map();
+    for (const stroke of this.drawingData?.strokes || []) {
+      const layout = normalizeElementLayout(stroke.layout);
+      const bounds = getStrokeBounds(stroke, this.canvasWidth(), this.canvasHeight());
+      if (!layout?.id || !bounds) {
+        continue;
+      }
+      const widthScale = (bounds.maxX - bounds.minX) / Math.max(0.01, layout.box.width);
+      const heightScale = (bounds.maxY - bounds.minY) / Math.max(0.01, layout.box.height);
+      items.push({
+        id: layout.id,
+        bounds,
+        scale: Math.max(0.05, (widthScale + heightScale) / 2)
+      });
+      layoutsById.set(layout.id, layout);
+    }
+    const relations = captureElementRelations(items, {
+      nearDistance: Math.min(96, Math.max(48, this.getResponsiveContentFrame().width * 0.1)),
+      maxRelations: 3
+    });
+    for (const stroke of this.drawingData?.strokes || []) {
+      const layout = normalizeElementLayout(stroke.layout);
+      if (layout?.id) {
+        layout.relations = relations.get(layout.id) || [];
+        stroke.layout = layout;
       }
     }
   }
   initializeAndProjectResponsivePoints(context, signature) {
     let migrated = false;
-    for (const stroke of this.drawingData?.strokes || []) {
-      stroke.points = stroke.points.map((point) => {
-        if (normalizeResponsiveAnchor(point.anchor)) {
-          return point;
+    const elementIds = /* @__PURE__ */ new Set();
+    for (const [index, stroke] of (this.drawingData?.strokes || []).entries()) {
+      const existingLayout = normalizeElementLayout(stroke.layout);
+      const hasUniqueElementLayout = Boolean(existingLayout?.id) && !elementIds.has(existingLayout.id);
+      if (!hasUniqueElementLayout) {
+        if (existingLayout) {
+          stroke.layout = { ...existingLayout, id: "" };
         }
+        stroke.points = stroke.points.map((point) => this.captureResponsivePoint(point, context));
+        this.captureElementLayoutForStroke(stroke, context, index);
         migrated = true;
-        return this.captureResponsivePoint(point, context);
-      });
+      }
+      const elementId = normalizeElementLayout(stroke.layout)?.id;
+      if (elementId) {
+        elementIds.add(elementId);
+      }
     }
     const lineToCanvasY = (path, line) => this.projectLineLocation(path, line, context);
+    if (migrated) {
+      this.rebuildElementRelations();
+    }
+    const projected = [];
+    const layoutsById = /* @__PURE__ */ new Map();
     for (const stroke of this.drawingData?.strokes || []) {
-      stroke.points = stroke.points.map((point) => projectResponsivePoint(point, {
+      const layout = normalizeElementLayout(stroke.layout);
+      const box = projectElementLayout(layout, {
         canvasWidth: this.canvasWidth(),
         canvasHeight: this.canvasHeight(),
         frame: context.frame,
+        viewportHeight: context.viewportHeight,
         lineToCanvasY
-      }));
+      });
+      if (layout?.id && box) {
+        projected.push(box);
+        layoutsById.set(layout.id, layout);
+      }
+    }
+    const projectedById = new Map(stabilizeElementRelations(projected, layoutsById).map((box) => [box.id, {
+      ...box,
+      x: clamp5(box.x, 0, Math.max(0, this.canvasWidth() - box.width)),
+      y: clamp5(box.y, 0, Math.max(0, this.canvasHeight() - box.height))
+    }]));
+    for (const stroke of this.drawingData?.strokes || []) {
+      const layout = normalizeElementLayout(stroke.layout);
+      const box = layout?.id ? projectedById.get(layout.id) : null;
+      if (layout && box) {
+        stroke.points = projectElementPoints(stroke.points, layout, box, {
+          canvasWidth: this.canvasWidth(),
+          canvasHeight: this.canvasHeight()
+        });
+        const metrics = scaleElementMetrics(layout.metrics, box.scale);
+        if (metrics.width) {
+          stroke.width = metrics.width;
+        }
+        if (isTextLikeStroke(stroke) && metrics.fontSize) {
+          stroke.fontSize = metrics.fontSize;
+        }
+        if (isTextStroke(stroke)) {
+          stroke.textWidth = metrics.textWidth || null;
+        }
+        if ((isTextLikeStroke(stroke) || isEmbedStroke(stroke)) && metrics.previewWidth && metrics.previewHeight) {
+          stroke.previewWidth = metrics.previewWidth;
+          stroke.previewHeight = metrics.previewHeight;
+        }
+      } else {
+        stroke.points = stroke.points.map((point) => projectResponsivePoint(point, {
+          canvasWidth: this.canvasWidth(),
+          canvasHeight: this.canvasHeight(),
+          frame: context.frame,
+          lineToCanvasY
+        }));
+      }
     }
     if (this.currentStroke?.points?.length) {
       this.currentStroke.points = this.currentStroke.points.map((point) => projectResponsivePoint(point, {
@@ -4265,7 +4999,7 @@ var PreviewDrawingController = class {
     this.responsivePointsInitialized = true;
     this.responsiveLayoutSignature = signature;
     if (migrated) {
-      this.drawingData.version = Math.max(2, Number(this.drawingData.version) || 1);
+      this.drawingData.version = Math.max(3, Number(this.drawingData.version) || 1);
       this.plugin.scheduleDrawingSave(this.file, this.drawingData);
     }
   }
@@ -4340,7 +5074,8 @@ var PreviewDrawingController = class {
     this.staticCtx.setTransform(backingStore.scale, 0, 0, backingStore.scale, 0, -canvasWindow.top * backingStore.scale);
     if (this.drawingsLoaded) {
       const frame = this.getResponsiveContentFrame();
-      const signature = responsiveLayoutSignature(width, height, frame, this.surfaceType);
+      const viewportHeight = measureResponsiveViewportHeight(this.previewEl, this.scrollContainer);
+      const signature = responsiveLayoutSignature(width, height, frame, this.surfaceType, viewportHeight);
       if (!this.responsivePointsInitialized || signature !== this.responsiveLayoutSignature) {
         this.responsiveLayoutContext = null;
         const context = this.getResponsiveLayoutContext(true);
@@ -4655,6 +5390,7 @@ var PreviewDrawingController = class {
       const responsiveContext = this.getResponsiveLayoutContext();
       this.currentStroke.points = this.currentStroke.points.map((point) => this.captureResponsivePoint(point, responsiveContext));
       this.drawingData.strokes.push(this.currentStroke);
+      this.captureResponsiveAnchorsForIndexes([this.drawingData.strokes.length - 1]);
       this.clearSelectedStrokes();
       this.redoStack = [];
       this.invalidateStaticCache();
@@ -4795,7 +5531,7 @@ var PreviewDrawingController = class {
   floatingTextContentWidth(element) {
     const rect = element.getBoundingClientRect();
     const insets = this.floatingTextEditorInsets(element);
-    return clamp4(rect.width - insets.horizontal, 24, 900);
+    return clamp5(rect.width - insets.horizontal, 24, 900);
   }
   openFloatingTextInput(point, index = -1) {
     this.endFloatingTextInput(false);
@@ -4815,7 +5551,7 @@ var PreviewDrawingController = class {
     textarea.value = isTextLikeStroke(existing) ? existing.text : "";
     applyElementStyles(textarea, {
       color: isTextLikeStroke(existing) ? existing.color : brushColor,
-      fontSize: `${isTextLikeStroke(existing) ? clamp4(Number(existing.fontSize || 18), 10, 72) : 18}px`,
+      fontSize: `${isTextLikeStroke(existing) ? clamp5(Number(existing.fontSize || 18), 10, 72) : 18}px`,
       fontWeight: isTextLikeStroke(existing) && existing.bold ? "700" : "400",
       fontFamily: isTextLikeStroke(existing) && existing.code ? "monospace" : "sans-serif"
     });
@@ -4941,6 +5677,7 @@ var PreviewDrawingController = class {
       this.drawingData.strokes.push(stroke);
       this.setSelectedStrokes(this.drawingData.strokes.length - 1);
     }
+    this.captureResponsiveAnchorsForIndexes(this.getSelectedStrokeIndexes());
     this.redoStack = [];
     this.invalidateStaticCache();
     this.plugin.scheduleDrawingSave(this.file, this.drawingData);
@@ -5021,6 +5758,7 @@ var PreviewDrawingController = class {
     };
     this.drawingData.strokes.push(stroke);
     this.setSelectedStrokes(this.drawingData.strokes.length - 1);
+    this.captureResponsiveAnchorsForIndexes([this.drawingData.strokes.length - 1]);
     this.redoStack = [];
     this.invalidateStaticCache();
     this.plugin.scheduleDrawingSave(this.file, this.drawingData);
@@ -5060,6 +5798,7 @@ var PreviewDrawingController = class {
       this.pendingEmbedTool = null;
       this.drawingData.strokes.push(stroke2);
       this.setSelectedStrokes(this.drawingData.strokes.length - 1);
+      this.captureResponsiveAnchorsForIndexes([this.drawingData.strokes.length - 1]);
       this.redoStack = [];
       this.invalidateStaticCache();
       this.plugin.scheduleDrawingSave(this.file, this.drawingData);
@@ -5089,6 +5828,7 @@ var PreviewDrawingController = class {
     this.pendingEmbedTool = null;
     this.drawingData.strokes.push(stroke);
     this.setSelectedStrokes(this.drawingData.strokes.length - 1);
+    this.captureResponsiveAnchorsForIndexes([this.drawingData.strokes.length - 1]);
     this.redoStack = [];
     this.invalidateStaticCache();
     this.plugin.scheduleDrawingSave(this.file, this.drawingData);
@@ -5268,8 +6008,8 @@ var PreviewDrawingController = class {
         maxY = Math.max(maxY, strokePoint.y);
       }
     }
-    const dx = clamp4(point.x - this.dragStrokeStartPoint.x, -minX, 1 - maxX);
-    const dy = clamp4(point.y - this.dragStrokeStartPoint.y, -minY, 1 - maxY);
+    const dx = clamp5(point.x - this.dragStrokeStartPoint.x, -minX, 1 - maxX);
+    const dy = clamp5(point.y - this.dragStrokeStartPoint.y, -minY, 1 - maxY);
     const movedDistance = pointDistanceOnCanvas(
       this.dragStrokeStartPoint,
       point,
@@ -5284,8 +6024,8 @@ var PreviewDrawingController = class {
     let snappedDy = dy;
     if (this.shouldSnapStrokeIndexes(Array.from(this.dragStrokeOriginalPoints.keys())) && this.dragStrokeOriginalBounds) {
       const snap = this.computeSnapDeltaForNormalizedBounds(translateNormalizedBounds(this.dragStrokeOriginalBounds, dx, dy), Array.from(this.dragStrokeOriginalPoints.keys()));
-      snappedDx = clamp4(dx + snap.dx, -minX, 1 - maxX);
-      snappedDy = clamp4(dy + snap.dy, -minY, 1 - maxY);
+      snappedDx = clamp5(dx + snap.dx, -minX, 1 - maxX);
+      snappedDy = clamp5(dy + snap.dy, -minY, 1 - maxY);
     }
     for (const [index, points] of this.dragStrokeOriginalPoints.entries()) {
       const stroke = this.drawingData.strokes[index];
@@ -5294,8 +6034,8 @@ var PreviewDrawingController = class {
       }
       stroke.points = points.map((strokePoint) => ({
         ...strokePoint,
-        x: clamp4(strokePoint.x + snappedDx, 0, 1),
-        y: clamp4(strokePoint.y + snappedDy, 0, 1)
+        x: clamp5(strokePoint.x + snappedDx, 0, 1),
+        y: clamp5(strokePoint.y + snappedDy, 0, 1)
       }));
     }
     this.requestRender(this.selectionHasDomStrokes());
@@ -5419,15 +6159,15 @@ var PreviewDrawingController = class {
     let scaleY = originalDy === 0 ? 1 : (point.y - anchor.y) / originalDy;
     scaleX = Math.max(0.12, scaleX);
     scaleY = Math.max(0.12, scaleY);
-    const strokeScale = clamp4((Math.abs(scaleX) + Math.abs(scaleY)) / 2, 0.2, 8);
+    const strokeScale = clamp5((Math.abs(scaleX) + Math.abs(scaleY)) / 2, 0.2, 8);
     const nextByIndex = /* @__PURE__ */ new Map();
     for (const [index, original] of originalStrokes.entries()) {
       nextByIndex.set(index, {
-        width: clamp4((original.width || this.penWidth) * strokeScale, 0.5, 80),
-        fontSize: clamp4((original.fontSize || 18) * strokeScale, 10, 72),
-        textWidth: Number(original.textWidth) > 0 ? clamp4(original.textWidth * Math.abs(scaleX), 24, 900) : null,
-        previewWidth: clamp4((original.previewWidth || 260) * Math.abs(scaleX), 80, 900),
-        previewHeight: clamp4((original.previewHeight || 160) * Math.abs(scaleY), 40, 700),
+        width: clamp5((original.width || this.penWidth) * strokeScale, 0.5, 80),
+        fontSize: clamp5((original.fontSize || 18) * strokeScale, 10, 72),
+        textWidth: Number(original.textWidth) > 0 ? clamp5(original.textWidth * Math.abs(scaleX), 24, 900) : null,
+        previewWidth: clamp5((original.previewWidth || 260) * Math.abs(scaleX), 80, 900),
+        previewHeight: clamp5((original.previewHeight || 160) * Math.abs(scaleY), 40, 700),
         points: original.points.map((strokePoint) => ({
           ...strokePoint,
           x: anchor.x + (strokePoint.x - anchor.x) * scaleX,
@@ -5452,8 +6192,8 @@ var PreviewDrawingController = class {
       }
       stroke.points = next.points.map((strokePoint) => ({
         ...strokePoint,
-        x: clamp4(strokePoint.x, 0, 1),
-        y: clamp4(strokePoint.y, 0, 1)
+        x: clamp5(strokePoint.x, 0, 1),
+        y: clamp5(strokePoint.y, 0, 1)
       }));
     }
   }
@@ -5693,7 +6433,7 @@ var PreviewDrawingController = class {
         top: `${Math.round(bounds.minY)}px`,
         width: `${Math.max(32, Math.round(bounds.maxX - bounds.minX))}px`,
         height: `${Math.max(28, Math.round(bounds.maxY - bounds.minY))}px`,
-        opacity: String(clamp4(Number(stroke.opacity ?? 1), 0, 1))
+        opacity: String(clamp5(Number(stroke.opacity ?? 1), 0, 1))
       });
       this.renderEmbedNode(node, stroke, index);
     }
@@ -5799,8 +6539,8 @@ var PreviewDrawingController = class {
       this.drawWatercolorStrokeOn(ctx, stroke, alpha);
       return;
     }
-    const count = clamp4(Math.round(Number(stroke.count || 1)), 1, MAX_PEN_COUNT);
-    const opacity = clamp4(Number(stroke.opacity ?? DEFAULT_PEN_OPACITY), 0, 1);
+    const count = clamp5(Math.round(Number(stroke.count || 1)), 1, MAX_PEN_COUNT);
+    const opacity = clamp5(Number(stroke.opacity ?? DEFAULT_PEN_OPACITY), 0, 1);
     const offsets = getPenOffsets(count, stroke.width || this.penWidth);
     ctx.save();
     ctx.globalAlpha = alpha * opacity;
@@ -5835,7 +6575,7 @@ var PreviewDrawingController = class {
     const height = Math.max(1, Math.round(bounds.maxY - bounds.minY));
     const fit = objectFitContain(image.naturalWidth, image.naturalHeight, width, height);
     ctx.save();
-    ctx.globalAlpha = clamp4(Number(stroke.opacity ?? 1), 0, 1);
+    ctx.globalAlpha = clamp5(Number(stroke.opacity ?? 1), 0, 1);
     ctx.fillStyle = "#fff";
     ctx.fillRect(x, y, width, height);
     ctx.imageSmoothingEnabled = true;
@@ -5881,8 +6621,8 @@ var PreviewDrawingController = class {
       return;
     }
     const point = this.pointToCanvas(stroke.points[0]);
-    const fontSize = clamp4(Number(stroke.fontSize || 18), 10, 72);
-    const opacity = clamp4(Number(stroke.opacity ?? 1), 0, 1);
+    const fontSize = clamp5(Number(stroke.fontSize || 18), 10, 72);
+    const opacity = clamp5(Number(stroke.opacity ?? 1), 0, 1);
     ctx.save();
     ctx.globalAlpha = alpha * opacity;
     ctx.font = `${stroke.bold ? "700 " : ""}${fontSize}px ${stroke.code ? "monospace" : "sans-serif"}`;
@@ -5919,7 +6659,7 @@ var PreviewDrawingController = class {
       return;
     }
     const width = Math.max(MIN_BRUSH_WIDTH, stroke.width || this.penWidth);
-    const opacity = clamp4(Number(stroke.opacity ?? 0.45), 0, 1);
+    const opacity = clamp5(Number(stroke.opacity ?? 0.45), 0, 1);
     ctx.save();
     ctx.globalAlpha = alpha * opacity;
     ctx.lineCap = "round";
@@ -6110,10 +6850,10 @@ var PreviewDrawingController = class {
       return null;
     }
     return {
-      minX: clamp4(bounds.minX / width, 0, 1),
-      minY: clamp4(bounds.minY / height, 0, 1),
-      maxX: clamp4(bounds.maxX / width, 0, 1),
-      maxY: clamp4(bounds.maxY / height, 0, 1)
+      minX: clamp5(bounds.minX / width, 0, 1),
+      minY: clamp5(bounds.minY / height, 0, 1),
+      maxX: clamp5(bounds.maxX / width, 0, 1),
+      maxY: clamp5(bounds.maxY / height, 0, 1)
     };
   }
   getSelectedStrokeNormalizedBounds() {
@@ -6160,8 +6900,8 @@ var PreviewDrawingController = class {
     const delta = this.computeSnapDeltaForNormalizedBounds(bounds, []);
     return {
       ...point,
-      x: clamp4((x + delta.dx * width) / width, 0, 1),
-      y: clamp4((y + delta.dy * height) / height, 0, 1)
+      x: clamp5((x + delta.dx * width) / width, 0, 1),
+      y: clamp5((y + delta.dy * height) / height, 0, 1)
     };
   }
   reorderSelectedStrokes(direction) {
@@ -6442,6 +7182,7 @@ var PreviewDrawingController = class {
     const removed = this.drawingData.strokes.pop();
     this.redoStack.push(removed);
     this.clearSelectedStrokes();
+    this.rebuildElementRelations();
     this.plugin.scheduleDrawingSave(this.file, this.drawingData);
     this.render();
   }
@@ -6452,6 +7193,7 @@ var PreviewDrawingController = class {
     const restored = this.redoStack.pop();
     this.drawingData.strokes.push(restored);
     this.setSelectedStrokes(this.drawingData.strokes.length - 1);
+    this.rebuildElementRelations();
     this.plugin.scheduleDrawingSave(this.file, this.drawingData);
     this.render();
   }
@@ -6465,6 +7207,7 @@ var PreviewDrawingController = class {
     }
     this.clearSelectedStrokes();
     this.redoStack = [];
+    this.rebuildElementRelations();
     this.plugin.scheduleDrawingSave(this.file, this.drawingData);
     this.render();
   }
@@ -6856,20 +7599,20 @@ function sanitizeSettings(settings) {
   return {
     language: normalizeLanguageCode(input.language ?? DEFAULT_SETTINGS.language),
     defaultPenColor: isCssColor(input.defaultPenColor) ? input.defaultPenColor : DEFAULT_SETTINGS.defaultPenColor,
-    defaultPenWidth: clamp4(Number(input.defaultPenWidth ?? DEFAULT_SETTINGS.defaultPenWidth), MIN_BRUSH_WIDTH, MAX_BRUSH_WIDTH),
-    defaultPenOpacity: clamp4(Number(input.defaultPenOpacity ?? DEFAULT_SETTINGS.defaultPenOpacity), 0, 1),
+    defaultPenWidth: clamp5(Number(input.defaultPenWidth ?? DEFAULT_SETTINGS.defaultPenWidth), MIN_BRUSH_WIDTH, MAX_BRUSH_WIDTH),
+    defaultPenOpacity: clamp5(Number(input.defaultPenOpacity ?? DEFAULT_SETTINGS.defaultPenOpacity), 0, 1),
     defaultWatercolorColor: isCssColor(input.defaultWatercolorColor) ? input.defaultWatercolorColor : DEFAULT_SETTINGS.defaultWatercolorColor,
-    defaultWatercolorWidth: clamp4(Number(input.defaultWatercolorWidth ?? DEFAULT_SETTINGS.defaultWatercolorWidth), MIN_BRUSH_WIDTH, MAX_BRUSH_WIDTH),
-    defaultWatercolorOpacity: clamp4(Number(input.defaultWatercolorOpacity ?? DEFAULT_SETTINGS.defaultWatercolorOpacity), 0, 1),
-    toolbarTopOffset: clamp4(Number(input.toolbarTopOffset ?? DEFAULT_SETTINGS.toolbarTopOffset), 0, 48),
-    longPressMs: clamp4(Number(input.longPressMs ?? DEFAULT_SETTINGS.longPressMs), MIN_LONG_PRESS_MS, MAX_LONG_PRESS_MS),
-    selectTapDistance: clamp4(Number(input.selectTapDistance ?? DEFAULT_SETTINGS.selectTapDistance), MIN_SELECT_TAP_DISTANCE, MAX_SELECT_TAP_DISTANCE),
-    selectStrokePadding: clamp4(Number(input.selectStrokePadding ?? DEFAULT_SETTINGS.selectStrokePadding), MIN_SELECT_STROKE_PADDING, MAX_SELECT_STROKE_PADDING),
-    selectedStrokeAlpha: clamp4(Number(input.selectedStrokeAlpha ?? DEFAULT_SETTINGS.selectedStrokeAlpha), MIN_SELECTED_STROKE_ALPHA, MAX_SELECTED_STROKE_ALPHA),
-    drawingInterpolationStep: clamp4(Number(input.drawingInterpolationStep ?? DEFAULT_SETTINGS.drawingInterpolationStep), MIN_DRAWING_INTERPOLATION_STEP_PX, MAX_DRAWING_INTERPOLATION_STEP_PX),
-    drawingMinPointDistance: clamp4(Number(input.drawingMinPointDistance ?? DEFAULT_SETTINGS.drawingMinPointDistance), MIN_DRAWING_MIN_POINT_DISTANCE_PX, MAX_DRAWING_MIN_POINT_DISTANCE_PX),
-    drawingCompactDistance: clamp4(Number(input.drawingCompactDistance ?? DEFAULT_SETTINGS.drawingCompactDistance), MIN_DRAWING_COMPACT_DISTANCE_PX, MAX_DRAWING_COMPACT_DISTANCE_PX),
-    autoSaveDelayMs: clamp4(Number(input.autoSaveDelayMs ?? DEFAULT_SETTINGS.autoSaveDelayMs), MIN_AUTO_SAVE_DELAY_MS, MAX_AUTO_SAVE_DELAY_MS),
+    defaultWatercolorWidth: clamp5(Number(input.defaultWatercolorWidth ?? DEFAULT_SETTINGS.defaultWatercolorWidth), MIN_BRUSH_WIDTH, MAX_BRUSH_WIDTH),
+    defaultWatercolorOpacity: clamp5(Number(input.defaultWatercolorOpacity ?? DEFAULT_SETTINGS.defaultWatercolorOpacity), 0, 1),
+    toolbarTopOffset: clamp5(Number(input.toolbarTopOffset ?? DEFAULT_SETTINGS.toolbarTopOffset), 0, 48),
+    longPressMs: clamp5(Number(input.longPressMs ?? DEFAULT_SETTINGS.longPressMs), MIN_LONG_PRESS_MS, MAX_LONG_PRESS_MS),
+    selectTapDistance: clamp5(Number(input.selectTapDistance ?? DEFAULT_SETTINGS.selectTapDistance), MIN_SELECT_TAP_DISTANCE, MAX_SELECT_TAP_DISTANCE),
+    selectStrokePadding: clamp5(Number(input.selectStrokePadding ?? DEFAULT_SETTINGS.selectStrokePadding), MIN_SELECT_STROKE_PADDING, MAX_SELECT_STROKE_PADDING),
+    selectedStrokeAlpha: clamp5(Number(input.selectedStrokeAlpha ?? DEFAULT_SETTINGS.selectedStrokeAlpha), MIN_SELECTED_STROKE_ALPHA, MAX_SELECTED_STROKE_ALPHA),
+    drawingInterpolationStep: clamp5(Number(input.drawingInterpolationStep ?? DEFAULT_SETTINGS.drawingInterpolationStep), MIN_DRAWING_INTERPOLATION_STEP_PX, MAX_DRAWING_INTERPOLATION_STEP_PX),
+    drawingMinPointDistance: clamp5(Number(input.drawingMinPointDistance ?? DEFAULT_SETTINGS.drawingMinPointDistance), MIN_DRAWING_MIN_POINT_DISTANCE_PX, MAX_DRAWING_MIN_POINT_DISTANCE_PX),
+    drawingCompactDistance: clamp5(Number(input.drawingCompactDistance ?? DEFAULT_SETTINGS.drawingCompactDistance), MIN_DRAWING_COMPACT_DISTANCE_PX, MAX_DRAWING_COMPACT_DISTANCE_PX),
+    autoSaveDelayMs: clamp5(Number(input.autoSaveDelayMs ?? DEFAULT_SETTINGS.autoSaveDelayMs), MIN_AUTO_SAVE_DELAY_MS, MAX_AUTO_SAVE_DELAY_MS),
     enableDebugLog: Boolean(input.enableDebugLog)
   };
 }
@@ -7241,7 +7984,7 @@ function normalizeCssColor(value) {
   if (!rgb) {
     return "";
   }
-  const toHex = (part) => clamp4(Math.round(Number(part)), 0, 255).toString(16).padStart(2, "0");
+  const toHex = (part) => clamp5(Math.round(Number(part)), 0, 255).toString(16).padStart(2, "0");
   return `#${toHex(rgb[1])}${toHex(rgb[2])}${toHex(rgb[3])}`;
 }
 function isSafeCssSize(value) {
@@ -7418,6 +8161,12 @@ function findOwningWorkspaceView(app, element) {
     getViewType: () => leafContent?.dataset?.type || "webview"
   };
 }
+function findOwningLeaf(app, element) {
+  if (!element) {
+    return null;
+  }
+  return collectWorkspaceLeaves(app).find((leaf) => leaf?.view?.containerEl?.contains(element)) || null;
+}
 function collectWorkspaceLeaves(app) {
   const leaves = [];
   try {
@@ -7464,6 +8213,17 @@ function isElementVisibleEnough(element) {
   }
   const rect = element.getBoundingClientRect?.();
   return Boolean(rect && rect.width > 8 && rect.height > 8 && rect.bottom > 0 && rect.right > 0 && rect.top < window.innerHeight && rect.left < window.innerWidth);
+}
+function isBlockingObsidianOverlayOpen(document) {
+  const candidates = document?.querySelectorAll?.(".modal-container .modal, .modal-container.mod-dim, .modal-bg") || [];
+  return Array.from(candidates).some((element) => {
+    if (!element?.isConnected) {
+      return false;
+    }
+    const style = element.ownerDocument?.defaultView?.getComputedStyle?.(element);
+    const rect = element.getBoundingClientRect?.();
+    return style?.display !== "none" && style?.visibility !== "hidden" && Number(style?.opacity ?? 1) !== 0 && Boolean(rect && rect.width > 1 && rect.height > 1);
+  });
 }
 function findWebviewSurfaces(root) {
   if (!root) {
@@ -7754,7 +8514,7 @@ function cleanupAllDrawingHeaderButtons() {
 }
 function cleanupDrawingUi(preview) {
   preview.querySelectorAll(".notedraw-button, .notedraw-fallback-button, .notedraw-webview-button, .notedraw-toolbar, .notedraw-palette-panel, .notedraw-text-panel, .notedraw-selection-menu, .notedraw-format-toolbar, .notedraw-embed-layer, .notedraw-file-input, .notedraw-static-canvas, .notedraw-canvas").forEach((element) => element.remove());
-  preview.classList.remove("notedraw-shell", "is-drawing-active", "is-drawing-hidden", "is-select-mode", "is-palette-open", "is-text-panel-open", "is-selection-menu-open", "is-watercolor-mode", "is-edit-md-mode", "is-selecting-strokes", "is-resizing-selection", "is-native-text-editing", "is-notedraw-webview-shell", "is-notedraw-responsive-layout", "has-notedraw-body-controls", "has-notedraw-canvas");
+  preview.classList.remove("notedraw-shell", "is-drawing-active", "is-drawing-hidden", "is-select-mode", "is-palette-open", "is-text-panel-open", "is-selection-menu-open", "is-watercolor-mode", "is-edit-md-mode", "is-selecting-strokes", "is-resizing-selection", "is-native-text-editing", "is-notedraw-webview-shell", "is-notedraw-responsive-layout", "is-notedraw-controls-visible", "has-notedraw-body-controls", "has-notedraw-canvas");
 }
 function isMarkdownContentMutation(mutation) {
   if (mutation?.type !== "childList") {
@@ -7780,6 +8540,19 @@ function isWebviewSyncMutation(mutation) {
     return false;
   }
   return [...Array.from(mutation.addedNodes || []), ...Array.from(mutation.removedNodes || [])].some((node) => isWebviewRelatedNode(node));
+}
+function isFloatingControlsVisibilityMutation(mutation) {
+  if (!mutation || mutation.target?.closest?.(".notedraw-body-control")) {
+    return false;
+  }
+  if (mutation.type === "attributes") {
+    return Boolean(mutation.target?.matches?.(".workspace-leaf, .workspace-leaf-content, .workspace-tabs, .modal-container, .modal, .app-container, body"));
+  }
+  if (mutation.type !== "childList") {
+    return false;
+  }
+  const selector = ".modal-container, .modal, .modal-bg, .workspace-leaf, .workspace-leaf-content";
+  return [...Array.from(mutation.addedNodes || []), ...Array.from(mutation.removedNodes || [])].some((node) => node?.nodeType === Node.ELEMENT_NODE && (node.matches?.(selector) || node.querySelector?.(selector)));
 }
 function isWebviewRelatedNode(node) {
   if (!node || node.nodeType !== Node.ELEMENT_NODE) {
@@ -7943,7 +8716,7 @@ function sanitizeHTMLToDomSafe(content) {
 }
 function createEmptyDrawingData(file) {
   return {
-    version: 2,
+    version: 3,
     sourcePath: file.path,
     strokes: [],
     webEdits: [],
@@ -7983,9 +8756,9 @@ function normalizeStroke(stroke) {
     embedType: normalizeEmbedType(stroke?.embedType),
     brush: stroke?.brush === BRUSH_WATERCOLOR ? BRUSH_WATERCOLOR : BRUSH_PEN,
     color: typeof stroke?.color === "string" ? stroke.color : "#e53935",
-    width: Number.isFinite(Number(stroke?.width)) ? clamp4(Number(stroke.width), MIN_BRUSH_WIDTH, 80) : 3,
-    opacity: clamp4(Number(stroke?.opacity ?? DEFAULT_PEN_OPACITY), 0, 1),
-    count: clamp4(Math.round(Number(stroke?.count) || 1), 1, MAX_PEN_COUNT),
+    width: Number.isFinite(Number(stroke?.width)) ? clamp5(Number(stroke.width), MIN_BRUSH_WIDTH, 80) : 3,
+    opacity: clamp5(Number(stroke?.opacity ?? DEFAULT_PEN_OPACITY), 0, 1),
+    count: clamp5(Math.round(Number(stroke?.count) || 1), 1, MAX_PEN_COUNT),
     text: typeof stroke?.text === "string" ? stroke.text : "",
     render: normalizeTextRenderMode(stroke?.render),
     assetPath: normalizeVaultPath(stroke?.assetPath || ""),
@@ -7993,10 +8766,10 @@ function normalizeStroke(stroke) {
     assetMime: typeof stroke?.assetMime === "string" ? stroke.assetMime : "",
     assetSize: Number.isFinite(Number(stroke?.assetSize)) ? Math.max(0, Number(stroke.assetSize)) : 0,
     exportImageDataUrl: normalizeImageDataUrl(stroke?.exportImageDataUrl),
-    previewWidth: Number.isFinite(Number(stroke?.previewWidth)) ? clamp4(Number(stroke.previewWidth), 80, 900) : 260,
-    previewHeight: Number.isFinite(Number(stroke?.previewHeight)) ? clamp4(Number(stroke.previewHeight), 40, 700) : 160,
-    textWidth: Number.isFinite(Number(stroke?.textWidth)) && Number(stroke.textWidth) > 0 ? clamp4(Number(stroke.textWidth), 24, 900) : null,
-    fontSize: Number.isFinite(Number(stroke?.fontSize)) ? clamp4(Number(stroke.fontSize), 10, 72) : 18,
+    previewWidth: Number.isFinite(Number(stroke?.previewWidth)) ? clamp5(Number(stroke.previewWidth), 80, 900) : 260,
+    previewHeight: Number.isFinite(Number(stroke?.previewHeight)) ? clamp5(Number(stroke.previewHeight), 40, 700) : 160,
+    textWidth: Number.isFinite(Number(stroke?.textWidth)) && Number(stroke.textWidth) > 0 ? clamp5(Number(stroke.textWidth), 24, 900) : null,
+    fontSize: Number.isFinite(Number(stroke?.fontSize)) ? clamp5(Number(stroke.fontSize), 10, 72) : 18,
     bold: Boolean(stroke?.bold),
     code: Boolean(stroke?.code),
     boxed: Boolean(stroke?.boxed),
@@ -8005,9 +8778,10 @@ function normalizeStroke(stroke) {
     buttonStyle: normalizeButtonStyle(stroke?.buttonStyle),
     snap: Boolean(stroke?.snap),
     locked: Boolean(stroke?.locked),
+    layout: normalizeElementLayout(stroke?.layout),
     points: points.map((point) => ({
-      x: clamp4(Number(point?.x), 0, 1),
-      y: clamp4(Number(point?.y), 0, 1),
+      x: clamp5(Number(point?.x), 0, 1),
+      y: clamp5(Number(point?.y), 0, 1),
       t: Number.isFinite(Number(point?.t)) ? Number(point.t) : Date.now(),
       anchor: normalizeResponsiveAnchor(point?.anchor)
     })).filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y))
@@ -8551,13 +9325,28 @@ function measureResponsiveContentFrame(previewEl, surfaceType, surfaceWidth, can
     contentWidth: contentRect.width
   });
 }
-function responsiveLayoutSignature(width, height, frame, surfaceType) {
+function measureResponsiveViewportHeight(previewEl, scrollContainer) {
+  const scrollRect = scrollContainer?.getBoundingClientRect?.();
+  const candidates = [
+    scrollContainer === previewEl ? previewEl?.clientHeight : scrollContainer?.clientHeight,
+    scrollRect?.height,
+    window.visualViewport?.height,
+    window.innerHeight,
+    previewEl?.clientHeight
+  ];
+  return Math.max(1, Number(candidates.find((value) => Number(value) > 1)) || 1);
+}
+function createElementLayoutId(index = -1) {
+  return `el-${Date.now().toString(36)}-${Math.max(0, Number(index) || 0).toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
+}
+function responsiveLayoutSignature(width, height, frame, surfaceType, viewportHeight) {
   return [
     surfaceType,
     Math.round(Number(width) || 0),
     Math.round(Number(height) || 0),
     Math.round(Number(frame?.left) || 0),
-    Math.round(Number(frame?.width) || 0)
+    Math.round(Number(frame?.width) || 0),
+    Math.round(Number(viewportHeight) || 0)
   ].join(":");
 }
 function collectRenderedLineAnchors(root, canvas, canvasWindowTop) {
@@ -8599,7 +9388,7 @@ function captureRenderedLineLocation(anchors, canvasX, canvasY) {
   if (!anchor) {
     return null;
   }
-  const ratio = clamp4((canvasY - anchor.top) / Math.max(1, anchor.height), 0, 0.999999);
+  const ratio = clamp5((canvasY - anchor.top) / Math.max(1, anchor.height), 0, 0.999999);
   return {
     path: anchor.path,
     line: anchor.start + ratio * Math.max(1, anchor.end - anchor.start + 1)
@@ -8617,7 +9406,7 @@ function projectRenderedLineLocation(anchors, path, line) {
   if (!anchor) {
     return NaN;
   }
-  const ratio = clamp4((lineNumber - anchor.start) / Math.max(1, anchor.end - anchor.start + 1), 0, 1);
+  const ratio = clamp5((lineNumber - anchor.start) / Math.max(1, anchor.end - anchor.start + 1), 0, 1);
   return anchor.top + ratio * anchor.height;
 }
 function captureCodeMirrorLineLocation(codeMirror, clientX, clientY, sourcePath) {
@@ -8632,7 +9421,7 @@ function captureCodeMirrorLineLocation(codeMirror, clientX, clientY, sourcePath)
     const endRect = codeMirror.coordsAtPos?.(line.to);
     const top = Math.min(startRect?.top ?? clientY, endRect?.top ?? startRect?.top ?? clientY);
     const bottom = Math.max(startRect?.bottom ?? clientY + 1, endRect?.bottom ?? startRect?.bottom ?? clientY + 1);
-    const ratio = clamp4((clientY - top) / Math.max(1, bottom - top), 0, 0.999999);
+    const ratio = clamp5((clientY - top) / Math.max(1, bottom - top), 0, 0.999999);
     return {
       path: normalizeVaultPath(sourcePath),
       line: Math.max(0, line.number - 1) + ratio
@@ -8649,7 +9438,7 @@ function projectCodeMirrorLineLocation(codeMirror, linePosition) {
     if (!doc?.line || !Number.isFinite(lineNumber)) {
       return NaN;
     }
-    const wantedLine = clamp4(Math.floor(lineNumber) + 1, 1, doc.lines || 1);
+    const wantedLine = clamp5(Math.floor(lineNumber) + 1, 1, doc.lines || 1);
     const line = doc.line(wantedLine);
     const startRect = codeMirror.coordsAtPos?.(line.from);
     const endRect = codeMirror.coordsAtPos?.(line.to);
@@ -8658,7 +9447,7 @@ function projectCodeMirrorLineLocation(codeMirror, linePosition) {
     }
     const top = Math.min(startRect?.top ?? endRect.top, endRect?.top ?? startRect.top);
     const bottom = Math.max(startRect?.bottom ?? endRect.bottom, endRect?.bottom ?? startRect.bottom);
-    return top + clamp4(lineNumber - Math.floor(lineNumber), 0, 1) * Math.max(1, bottom - top);
+    return top + clamp5(lineNumber - Math.floor(lineNumber), 0, 1) * Math.max(1, bottom - top);
   } catch (error) {
     void error;
     return NaN;
@@ -8698,7 +9487,7 @@ function measureVisibleSurfaceWindow(previewEl, scrollContainer, documentHeight)
   if (scrollContainer === previewEl) {
     const viewportHeight = Math.max(1, previewEl.clientHeight || previewRect?.height || window.innerHeight || 1);
     return {
-      top: clamp4(Number(previewEl.scrollTop) || 0, 0, Math.max(0, height - viewportHeight)),
+      top: clamp5(Number(previewEl.scrollTop) || 0, 0, Math.max(0, height - viewportHeight)),
       height: Math.min(height, viewportHeight)
     };
   }
@@ -8711,7 +9500,7 @@ function measureVisibleSurfaceWindow(previewEl, scrollContainer, documentHeight)
   const viewportTop = Math.max(0, viewportRect.top - surfaceTop);
   const viewportBottom = Math.min(height, (viewportRect.bottom || viewportRect.top + viewportRect.height) - surfaceTop);
   return {
-    top: clamp4(viewportTop, 0, Math.max(0, height - 1)),
+    top: clamp5(viewportTop, 0, Math.max(0, height - 1)),
     height: Math.max(1, viewportBottom - viewportTop || viewportRect.height || window.innerHeight || 1)
   };
 }
@@ -8837,10 +9626,10 @@ function pointDistanceOnCanvas(a, b, width, height) {
 }
 function getTextStrokeLayout(stroke, width, measureText = null) {
   const point = stroke?.points?.[0] || { x: 0, y: 0 };
-  const fontSize = clamp4(Number(stroke?.fontSize || 18), 10, 72);
+  const fontSize = clamp5(Number(stroke?.fontSize || 18), 10, 72);
   const uiArrow = stroke?.uiRole === "arrow";
   const padded = !uiArrow && (stroke?.boxed || stroke?.code || stroke?.file || isButtonLikeStroke(stroke));
-  const canvasX = clamp4(Number(point.x || 0), 0, 1) * Math.max(1, Number(width) || 1);
+  const canvasX = clamp5(Number(point.x || 0), 0, 1) * Math.max(1, Number(width) || 1);
   const maxWidth = Math.max(fontSize, Math.max(1, Number(width) || 1) - canvasX - Math.max(8, fontSize * 0.45) - 8);
   return computeTextLayout({
     text: String(stroke?.text || "").trim(),
@@ -8857,8 +9646,8 @@ function getStrokeBounds(stroke, width, height) {
   }
   if (isEmbedStroke(stroke) || isRichTextStroke(stroke)) {
     const point = stroke.points[0];
-    const previewWidth = clamp4(Number(stroke.previewWidth || 260), 80, 900);
-    const previewHeight = clamp4(Number(stroke.previewHeight || 160), 40, 700);
+    const previewWidth = clamp5(Number(stroke.previewWidth || 260), 80, 900);
+    const previewHeight = clamp5(Number(stroke.previewHeight || 160), 40, 700);
     const x = point.x * width;
     const y = point.y * height;
     return {
@@ -9075,7 +9864,7 @@ function distanceToSegment(point, start, end) {
   if (dx === 0 && dy === 0) {
     return pointerDistance(point, start);
   }
-  const t = clamp4(((point.x - start.x) * dx + (point.y - start.y) * dy) / (dx * dx + dy * dy), 0, 1);
+  const t = clamp5(((point.x - start.x) * dx + (point.y - start.y) * dy) / (dx * dx + dy * dy), 0, 1);
   const projection = {
     x: start.x + t * dx,
     y: start.y + t * dy
@@ -9134,7 +9923,7 @@ function formatReplacementBlock(originalBlock, editedText) {
   }
   return edited;
 }
-function clamp4(value, min, max) {
+function clamp5(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
 
