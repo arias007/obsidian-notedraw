@@ -356,11 +356,19 @@ function normalizeRelation(relation) {
     return null;
   }
   const kind = ["intersection", "overlap", "near"].includes(relation.kind) ? relation.kind : "near";
+  const sourceU = Number(relation.sourceU);
+  const sourceV = Number(relation.sourceV);
+  const targetU = Number(relation.targetU);
+  const targetV = Number(relation.targetV);
   return {
     targetId: relation.targetId,
     kind,
     sourceCorner: CORNER_NAMES.includes(relation.sourceCorner) ? relation.sourceCorner : "topLeft",
     targetCorner: CORNER_NAMES.includes(relation.targetCorner) ? relation.targetCorner : "topLeft",
+    ...Number.isFinite(sourceU) ? { sourceU: clamp3(sourceU, 0, 1) } : {},
+    ...Number.isFinite(sourceV) ? { sourceV: clamp3(sourceV, 0, 1) } : {},
+    ...Number.isFinite(targetU) ? { targetU: clamp3(targetU, 0, 1) } : {},
+    ...Number.isFinite(targetV) ? { targetV: clamp3(targetV, 0, 1) } : {},
     dx: finite2(relation.dx, 0),
     dy: finite2(relation.dy, 0),
     weight: clamp3(finite2(relation.weight, kind === "near" ? 0.14 : 0.26), 0.05, 0.4)
@@ -494,10 +502,11 @@ function clampAxisRatio(scales, { maxXOverY = 1.65, maxYOverX = 1.9 } = {}) {
   if (yScale > xScale * maxYOverX) {
     yScale = xScale * maxYOverX;
   }
+  const scale = calculateVisualScale(xScale, yScale, scales.scale);
   return {
     xScale,
     yScale,
-    scale: Math.sqrt(Math.max(1e-3, xScale * yScale))
+    scale
   };
 }
 function blendScale(base, candidate, weight) {
@@ -506,12 +515,22 @@ function blendScale(base, candidate, weight) {
   }
   return Math.exp(Math.log(Math.max(1e-3, base)) * (1 - weight) + Math.log(Math.max(1e-3, candidate)) * weight);
 }
+function calculateVisualScale(xScaleInput, yScaleInput, baseScaleInput = 1) {
+  const xScale = Math.max(1e-3, finite2(xScaleInput, 1));
+  const yScale = Math.max(1e-3, finite2(yScaleInput, 1));
+  const geometric = Math.sqrt(xScale * yScale);
+  const baseScale = clamp3(finite2(baseScaleInput, geometric), 0.42, 2.4);
+  const widthProtected = blendScale(xScale, geometric, xScale < geometric ? 0.46 : 0.22);
+  const baseProtected = blendScale(widthProtected, baseScale, 0.34);
+  const sameWidthFloor = xScale >= 0.82 ? Math.min(xScale, baseScale) * 0.94 : 0.42;
+  return clamp3(Math.max(geometric, baseProtected, sameWidthFloor), 0.42, 2.4);
+}
 function calculateElementScales(sourceFrameInput, targetFrameInput, boxInput = {}) {
   const source = normalizeFrame(sourceFrameInput);
   const target = normalizeFrame(targetFrameInput);
   const box = normalizeBox(boxInput);
   const widthScale = clamp3(target.contentWidth / source.contentWidth, 0.2, 5);
-  const documentScale = clamp3(target.documentHeight / source.documentHeight, 0.2, 5);
+  const documentScale = clamp3(target.documentHeight / source.documentHeight, 0.28, 3.6);
   const viewportScale = clamp3(target.viewportHeight / source.viewportHeight, 0.25, 4);
   const aspectChange = target.aspectRatio / Math.max(0.01, source.aspectRatio);
   const widthWeight = aspectChange < 0.9 ? 0.8 : aspectChange > 1.35 ? 0.62 : 0.7;
@@ -525,7 +544,7 @@ function calculateElementScales(sourceFrameInput, targetFrameInput, boxInput = {
   const wideTarget = target.aspectRatio > 1.05;
   let xScale = blendScale(widthScale, scale, portraitTarget ? 0.12 : 0.24);
   let yScale = Math.exp(
-    Math.log(documentScale) * (portraitTarget ? 0.74 : wideTarget ? 0.56 : 0.64) + Math.log(viewportScale) * (portraitTarget ? 0.26 : wideTarget ? 0.44 : 0.36)
+    Math.log(documentScale) * (portraitTarget ? 0.58 : wideTarget ? 0.38 : 0.46) + Math.log(viewportScale) * (portraitTarget ? 0.24 : wideTarget ? 0.34 : 0.3) + Math.log(widthScale) * (portraitTarget ? 0.18 : wideTarget ? 0.28 : 0.24)
   );
   yScale = blendScale(yScale, scale, portraitTarget ? 0.1 : 0.22);
   xScale = clamp3(Math.min(xScale, fitScale), 0.34, 2.8);
@@ -594,7 +613,7 @@ function projectElementLayout(layoutInput, {
   const fitXScale = targetFrame.contentWidth * 0.98 / Math.max(1, layout.box.width);
   if (xScale > fitXScale) {
     xScale = fitXScale;
-    scale = Math.sqrt(Math.max(1e-3, xScale * yScale));
+    scale = calculateVisualScale(xScale, yScale, scale);
   }
   let x = primary.x;
   if (projectedBottom && Number.isFinite(projectedBottom.x) && Math.abs(projectedBottom.x - primary.x) <= Math.max(24, layout.box.width * scale * 0.25)) {
@@ -631,6 +650,19 @@ function overlapArea(a, b) {
   const height = Math.max(0, Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y));
   return width * height;
 }
+function overlapCenter(a, b) {
+  const left = Math.max(a.x, b.x);
+  const right = Math.min(a.x + a.width, b.x + b.width);
+  const top = Math.max(a.y, b.y);
+  const bottom = Math.min(a.y + a.height, b.y + b.height);
+  if (right <= left || bottom <= top) {
+    return null;
+  }
+  return {
+    x: (left + right) / 2,
+    y: (top + bottom) / 2
+  };
+}
 function boxCorner(box, name) {
   return {
     x: box.x + (name === "topRight" || name === "bottomRight" ? box.width : 0),
@@ -650,6 +682,30 @@ function nearestCornerPair(source, target) {
     }
   }
   return best;
+}
+function normalizeBoxAnchor(box, point) {
+  return {
+    u: clamp3((point.x - box.x) / Math.max(0.01, box.width), 0, 1),
+    v: clamp3((point.y - box.y) / Math.max(0.01, box.height), 0, 1)
+  };
+}
+function relationBoxPoint(box, relation, prefix) {
+  const u = finite2(relation?.[`${prefix}U`], NaN);
+  const v = finite2(relation?.[`${prefix}V`], NaN);
+  if (Number.isFinite(u) && Number.isFinite(v)) {
+    return {
+      x: box.x + clamp3(u, 0, 1) * box.width,
+      y: box.y + clamp3(v, 0, 1) * box.height
+    };
+  }
+  return boxCorner(box, relation?.[`${prefix}Corner`]);
+}
+function relationBoxOffset(box, relation, prefix) {
+  const point = relationBoxPoint({ x: 0, y: 0, width: box.width, height: box.height }, relation, prefix);
+  return {
+    x: point.x,
+    y: point.y
+  };
 }
 function captureElementRelations(items, { nearDistance = 80, maxRelations = 3 } = {}) {
   const normalized = (Array.isArray(items) ? items : []).map((item) => ({
@@ -707,17 +763,22 @@ function captureElementRelations(items, { nearDistance = 80, maxRelations = 3 } 
       const kind = overlap > 0 ? "intersection" : "near";
       const relationScaleX = Math.max(0.05, (source.xScale + target.xScale) / 2);
       const relationScaleY = Math.max(0.05, (source.yScale + target.yScale) / 2);
-      const cornerPair = kind === "intersection" ? { sourceCorner: "topLeft", targetCorner: "topLeft" } : nearestCornerPair(source.bounds, target.bounds);
-      const sourceCornerPoint = boxCorner(source.bounds, cornerPair.sourceCorner);
-      const targetCornerPoint = boxCorner(target.bounds, cornerPair.targetCorner);
+      const cornerPair = nearestCornerPair(source.bounds, target.bounds);
+      const intersectionCenter = kind === "intersection" ? overlapCenter(source.bounds, target.bounds) : null;
+      const sourceAnchor = intersectionCenter ? normalizeBoxAnchor(source.bounds, intersectionCenter) : null;
+      const targetAnchor = intersectionCenter ? normalizeBoxAnchor(target.bounds, intersectionCenter) : null;
+      const sourceCornerPoint = intersectionCenter || boxCorner(source.bounds, cornerPair.sourceCorner);
+      const targetCornerPoint = intersectionCenter || boxCorner(target.bounds, cornerPair.targetCorner);
       candidates.push({
         targetId: target.id,
         kind,
         sourceCorner: cornerPair.sourceCorner,
         targetCorner: cornerPair.targetCorner,
+        ...sourceAnchor ? { sourceU: sourceAnchor.u, sourceV: sourceAnchor.v } : {},
+        ...targetAnchor ? { targetU: targetAnchor.u, targetV: targetAnchor.v } : {},
         dx: (targetCornerPoint.x - sourceCornerPoint.x) / relationScaleX,
         dy: (targetCornerPoint.y - sourceCornerPoint.y) / relationScaleY,
-        weight: kind === "intersection" ? 0.28 : 0.14,
+        weight: kind === "intersection" ? 0.32 : 0.14,
         score: kind === "intersection" ? -overlap - 1 : gap
       });
     }
@@ -743,8 +804,8 @@ function stabilizeElementRelations(projectedItems, layouts) {
       }
       const relationScaleX = (finite2(source.xScale, source.scale) + finite2(target.xScale, target.scale)) / 2;
       const relationScaleY = (finite2(source.yScale, source.scale) + finite2(target.yScale, target.scale)) / 2;
-      const sourceOffset = boxCorner({ x: 0, y: 0, width: source.width, height: source.height }, relation.sourceCorner);
-      const targetCorner = boxCorner(target, relation.targetCorner);
+      const sourceOffset = relationBoxOffset(source, relation, "source");
+      const targetCorner = relationBoxPoint(target, relation, "target");
       const expectedX = targetCorner.x - relation.dx * relationScaleX - sourceOffset.x;
       const expectedY = targetCorner.y - relation.dy * relationScaleY - sourceOffset.y;
       const limitX = relation.kind === "near" ? Math.min(72, Math.max(24, source.width * 0.35)) : Math.min(96, Math.max(32, source.width * 0.5));
@@ -1964,7 +2025,9 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
       this.syncWebviewControllers();
       for (const controller of this.liveControllers) {
         controller.syncFloatingControlClasses();
-        controller.scheduleLayoutRefresh();
+        if (controller.active || controller.drawingsLoaded || isElementVisibleEnough(controller.previewEl)) {
+          controller.scheduleLayoutRefresh({ settle: false });
+        }
       }
     };
     this.registerEvent(this.app.workspace.on("layout-change", syncSurfaces));
@@ -2121,13 +2184,15 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
   }
   setControllerActivation(controller, active) {
     const key = this.controllerStateKey(controller);
+    const enabled = Boolean(active);
     if (key) {
-      this.viewDrawingActive.set(key, Boolean(active));
+      this.viewDrawingActive.set(key, enabled);
     }
     for (const candidate of this.liveControllers) {
       const candidateKey = this.controllerStateKey(candidate);
       if (!candidate.destroyed && candidateKey === key) {
-        candidate.applyActiveState(Boolean(active));
+        const eager = !enabled || candidate === controller || isElementVisibleEnough(candidate.previewEl);
+        candidate.applyActiveState(enabled, { eager });
       }
     }
   }
@@ -2229,7 +2294,7 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
       on: (eventName, listener) => this.onApiEvent(eventName, listener)
     };
     return {
-      version: "3.1.45",
+      version: "3.1.46",
       apiVersion: v1.apiVersion,
       capabilities,
       v1,
@@ -2350,8 +2415,8 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
       controller.responsiveLayoutContext = null;
       controller.invalidateStaticCache();
       if (isElementVisibleEnough(controller.previewEl)) {
-        controller.resizeCanvas();
-        controller.render();
+        controller.scheduleLayoutRefresh({ settle: false });
+        controller.requestRender(true);
       }
       refreshed += 1;
     }
@@ -3866,10 +3931,11 @@ var PreviewDrawingController = class {
     }
     this.plugin.setControllerActivation(this, nextActive);
   }
-  applyActiveState(active) {
+  applyActiveState(active, options = {}) {
     if (this.destroyed) {
       return;
     }
+    const eager = options.eager !== false;
     const wasActive = this.active;
     this.active = Boolean(active);
     this.previewEl.toggleClass("is-drawing-active", this.active);
@@ -3885,11 +3951,13 @@ var PreviewDrawingController = class {
       this.cancelCurrentStroke();
       this.cancelSelectionDrag(true);
       this.cancelSelectedStrokeDrag(true);
-    } else if (this.active && (!wasActive || !this.drawingsLoaded)) {
+    } else if (this.active && eager && (!wasActive || !this.drawingsLoaded)) {
       this.ensureDrawingsLoaded().catch((error) => {
         console.error(`[${PLUGIN_ID}] Failed to load drawings`, error);
       });
       this.scheduleLayoutRefresh();
+    } else if (this.active && !eager) {
+      this.layoutRefreshGeneration += 1;
     }
   }
   controlsShouldBeVisible() {
@@ -3912,6 +3980,13 @@ var PreviewDrawingController = class {
       element?.toggleClass("is-palette-open", Boolean(this.paletteOpen));
       element?.toggleClass("is-text-panel-open", Boolean(this.textPanelOpen));
       element?.toggleClass("is-selection-menu-open", Boolean(this.selectionMenuOpen));
+    }
+    if (visible && this.active && !this.drawingsLoaded && !this.loadingDrawings) {
+      this.ensureDrawingsLoaded().then(() => {
+        this.scheduleLayoutRefresh({ settle: false });
+      }).catch((error) => {
+        console.error(`[${PLUGIN_ID}] Failed to load drawings`, error);
+      });
     }
   }
   async ensureDrawingsLoaded() {
@@ -3995,21 +4070,27 @@ var PreviewDrawingController = class {
     this.scrollEventTarget = nextTarget;
     this.scrollEventTarget?.addEventListener("scroll", this.onScroll, { passive: true });
   }
-  scheduleLayoutRefresh() {
+  scheduleLayoutRefresh(options = {}) {
+    const settle = options.settle !== false;
     const generation = ++this.layoutRefreshGeneration;
     const refresh = () => {
       if (!this.destroyed && generation === this.layoutRefreshGeneration) {
-        this.scheduleResize();
+        if (this.active || this.drawingsLoaded || isElementVisibleEnough(this.previewEl)) {
+          this.scheduleResize();
+        }
       }
     };
     refresh();
     window.requestAnimationFrame?.(refresh);
-    window.requestAnimationFrame?.(() => window.requestAnimationFrame?.(refresh));
     window.setTimeout(refresh, 80);
     window.setTimeout(refresh, 350);
-    window.setTimeout(refresh, 800);
-    window.setTimeout(refresh, 1600);
-    window.setTimeout(refresh, 2600);
+    if (settle) {
+      window.requestAnimationFrame?.(() => window.requestAnimationFrame?.(refresh));
+      window.setTimeout(refresh, 900);
+      if (isMobileRuntime()) {
+        window.setTimeout(refresh, 1600);
+      }
+    }
   }
   scheduleMarkdownAnnotationRefresh() {
     if (this.markdownAnnotationTimer !== null || this.destroyed) {
@@ -5740,6 +5821,9 @@ var PreviewDrawingController = class {
   openFloatingTextInput(point, index = -1) {
     this.endFloatingTextInput(false);
     this.endTextEdit();
+    if (!this.drawingsVisible) {
+      this.setDrawingsVisible(true);
+    }
     const existing = index >= 0 ? this.drawingData.strokes[index] : null;
     const brushColor = this.currentBrushSettings().color || this.penColor;
     const preset = isTextLikeStroke(existing) ? existing : createTextPreset(this.textPreset, " ", brushColor);
@@ -5841,10 +5925,14 @@ var PreviewDrawingController = class {
       this.endFloatingTextInput(false, state);
       return;
     }
+    if (!this.drawingsVisible) {
+      this.setDrawingsVisible(true);
+    }
     if (state.index >= 0 && isTextLikeStroke(this.drawingData.strokes[state.index])) {
       const stroke = this.drawingData.strokes[state.index];
       stroke.text = text;
       stroke.render = normalizeTextRenderMode(stroke.render);
+      stroke.fontSize = clamp5(Number(stroke.fontSize || 18), 10, 72);
       if (isRichTextStroke(stroke)) {
         stroke.previewWidth = stroke.previewWidth || 300;
         stroke.previewHeight = stroke.previewHeight || 180;
@@ -5864,7 +5952,7 @@ var PreviewDrawingController = class {
         count: 1,
         text: preset.text,
         render: preset.render || TEXT_RENDER_PLAIN,
-        fontSize: preset.fontSize,
+        fontSize: clamp5(Number(preset.fontSize || 18), 10, 72),
         bold: preset.bold,
         code: preset.code,
         boxed: preset.boxed,
@@ -5885,6 +5973,7 @@ var PreviewDrawingController = class {
     this.redoStack = [];
     this.invalidateStaticCache();
     this.plugin.scheduleDrawingSave(this.file, this.drawingData);
+    this.scheduleLayoutRefresh({ settle: false });
     this.endFloatingTextInput(false, state);
     this.render();
   }
@@ -5936,6 +6025,9 @@ var PreviewDrawingController = class {
     this.openFloatingTextInput(snappedPoint);
   }
   insertTextPresetAt(point, presetId, text) {
+    if (!this.drawingsVisible) {
+      this.setDrawingsVisible(true);
+    }
     const brush = this.currentBrushSettings();
     const preset = createTextPreset(presetId, text, brush.color || this.penColor);
     const stroke = {
@@ -5947,7 +6039,7 @@ var PreviewDrawingController = class {
       count: 1,
       text: preset.text,
       render: preset.render || TEXT_RENDER_PLAIN,
-      fontSize: preset.fontSize,
+      fontSize: clamp5(Number(preset.fontSize || 18), 10, 72),
       bold: preset.bold,
       code: preset.code,
       boxed: preset.boxed,
@@ -5966,6 +6058,7 @@ var PreviewDrawingController = class {
     this.redoStack = [];
     this.invalidateStaticCache();
     this.plugin.scheduleDrawingSave(this.file, this.drawingData);
+    this.scheduleLayoutRefresh({ settle: false });
     this.render();
   }
   async insertImportedAsset(fileLike, point) {

@@ -27,15 +27,15 @@ test("the stable v1 API exposes Cancip-friendly capabilities and events", async 
   assert.match(source, /on: \(eventName, listener\) => this\.onApiEvent\(eventName, listener\)/);
 });
 
-test("3.1.45 projects version-three element frames behind a layout signature", async () => {
+test("3.1.46 projects stable element frames without eager hidden-view refresh", async () => {
   const [source, manifestText] = await Promise.all([
     readFile(sourceUrl, "utf8"),
     readFile(manifestUrl, "utf8")
   ]);
   const manifest = JSON.parse(manifestText);
 
-  assert.equal(manifest.version, "3.1.45");
-  assert.match(source, /version: "3\.1\.45"/);
+  assert.equal(manifest.version, "3.1.46");
+  assert.match(source, /version: "3\.1\.46"/);
   assert.match(source, /if \(!this\.responsivePointsInitialized \|\| signature !== this\.responsiveLayoutSignature\)/);
   assert.match(source, /migratedDrawingData\.version = Math\.max\(3/);
   assert.match(source, /captureElementLayoutForStroke/);
@@ -44,7 +44,9 @@ test("3.1.45 projects version-three element frames behind a layout signature", a
   assert.match(source, /elementLayoutNeedsRepair\(existingLayout\)/);
   assert.match(source, /normalizeDrawingDataForStorage\(this\.drawingData, this\.file\)/);
   assert.match(source, /scheduleDrawingSave\(this\.file, migratedDrawingData, \{ excludeData: this\.drawingData \}\)/);
-  assert.match(source, /for \(const controller of this\.liveControllers\) \{\s*controller\.syncFloatingControlClasses\(\);\s*controller\.scheduleLayoutRefresh\(\)/);
+  assert.match(source, /for \(const controller of this\.liveControllers\) \{\s*controller\.syncFloatingControlClasses\(\);\s*if \(controller\.active \|\| controller\.drawingsLoaded \|\| isElementVisibleEnough\(controller\.previewEl\)\) \{\s*controller\.scheduleLayoutRefresh\(\{ settle: false \}\)/);
+  assert.match(source, /const eager = !enabled \|\| candidate === controller \|\| isElementVisibleEnough\(candidate\.previewEl\);\s*candidate\.applyActiveState\(enabled, \{ eager \}\)/);
+  assert.match(source, /scheduleLayoutRefresh\(options = \{\}\)/);
   assert.match(source, /generation === this\.layoutRefreshGeneration/);
 });
 
@@ -55,6 +57,7 @@ test("reading and source controllers share the latest in-memory drawing state", 
   assert.match(source, /const canonical = normalizeDrawingDataForStorage\(data, file\);\s*this\.drawingStateCache\.set\(path, canonical\);\s*this\.pendingDrawingSaves\.set\(path, file\);\s*this\.refreshControllersForFile\(file, canonical, \{ excludeData: options\.excludeData \|\| data \}\)/);
   assert.match(source, /writeDrawings\(file, compacted, \{ refresh: false, updateCache: false \}\)/);
   assert.match(source, /this\.plugin\.setControllerActivation\(this, nextActive\)/);
+  assert.match(source, /controller\.scheduleLayoutRefresh\(\{ settle: false \}\);\s*controller\.requestRender\(true\)/);
   assert.match(source, /this\.textPanel = createNoteDrawControlElement\(this\.floatingControlsHost, "notedraw-text-panel"\)/);
   assert.doesNotMatch(source, /if \(this\.surfaceType !== "source"\) \{\s*this\.textButton/);
 });
@@ -99,6 +102,9 @@ test("floating text editing keeps one anchor and survives multiline IME input", 
   assert.match(source, /this\.openFloatingTextInput\(stroke\.points\[0\], index\)/);
   assert.match(source, /textarea\.addEventListener\("compositionstart"/);
   assert.match(source, /textarea\.addEventListener\("compositionend"/);
+  assert.match(source, /if \(!this\.drawingsVisible\) \{\s*this\.setDrawingsVisible\(true\)/);
+  assert.match(source, /fontSize: clamp\(Number\(preset\.fontSize \|\| 18\), 10, 72\)/);
+  assert.match(source, /this\.scheduleLayoutRefresh\(\{ settle: false \}\)/);
   assert.match(source, /stroke\.textWidth = this\.floatingTextContentWidth/);
   assert.match(source, /layout\.lines\.forEach/);
 });

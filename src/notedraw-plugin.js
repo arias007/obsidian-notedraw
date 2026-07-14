@@ -1066,7 +1066,9 @@ var NoteDrawPlugin = class extends Plugin {
       this.syncWebviewControllers();
       for (const controller of this.liveControllers) {
         controller.syncFloatingControlClasses();
-        controller.scheduleLayoutRefresh();
+        if (controller.active || controller.drawingsLoaded || isElementVisibleEnough(controller.previewEl)) {
+          controller.scheduleLayoutRefresh({ settle: false });
+        }
       }
     };
     this.registerEvent(this.app.workspace.on("layout-change", syncSurfaces));
@@ -1223,13 +1225,15 @@ var NoteDrawPlugin = class extends Plugin {
   }
   setControllerActivation(controller, active) {
     const key = this.controllerStateKey(controller);
+    const enabled = Boolean(active);
     if (key) {
-      this.viewDrawingActive.set(key, Boolean(active));
+      this.viewDrawingActive.set(key, enabled);
     }
     for (const candidate of this.liveControllers) {
       const candidateKey = this.controllerStateKey(candidate);
       if (!candidate.destroyed && candidateKey === key) {
-        candidate.applyActiveState(Boolean(active));
+        const eager = !enabled || candidate === controller || isElementVisibleEnough(candidate.previewEl);
+        candidate.applyActiveState(enabled, { eager });
       }
     }
   }
@@ -1331,7 +1335,7 @@ var NoteDrawPlugin = class extends Plugin {
       on: (eventName, listener) => this.onApiEvent(eventName, listener)
     };
     return {
-      version: "3.1.45",
+      version: "3.1.46",
       apiVersion: v1.apiVersion,
       capabilities,
       v1,
@@ -1458,8 +1462,8 @@ var NoteDrawPlugin = class extends Plugin {
       controller.responsiveLayoutContext = null;
       controller.invalidateStaticCache();
       if (isElementVisibleEnough(controller.previewEl)) {
-        controller.resizeCanvas();
-        controller.render();
+        controller.scheduleLayoutRefresh({ settle: false });
+        controller.requestRender(true);
       }
       refreshed += 1;
     }
@@ -2974,10 +2978,11 @@ var PreviewDrawingController = class {
     }
     this.plugin.setControllerActivation(this, nextActive);
   }
-  applyActiveState(active) {
+  applyActiveState(active, options = {}) {
     if (this.destroyed) {
       return;
     }
+    const eager = options.eager !== false;
     const wasActive = this.active;
     this.active = Boolean(active);
     this.previewEl.toggleClass("is-drawing-active", this.active);
@@ -2993,11 +2998,13 @@ var PreviewDrawingController = class {
       this.cancelCurrentStroke();
       this.cancelSelectionDrag(true);
       this.cancelSelectedStrokeDrag(true);
-    } else if (this.active && (!wasActive || !this.drawingsLoaded)) {
+    } else if (this.active && eager && (!wasActive || !this.drawingsLoaded)) {
       this.ensureDrawingsLoaded().catch((error) => {
         console.error(`[${PLUGIN_ID}] Failed to load drawings`, error);
       });
       this.scheduleLayoutRefresh();
+    } else if (this.active && !eager) {
+      this.layoutRefreshGeneration += 1;
     }
   }
   controlsShouldBeVisible() {
@@ -3020,6 +3027,13 @@ var PreviewDrawingController = class {
       element?.toggleClass("is-palette-open", Boolean(this.paletteOpen));
       element?.toggleClass("is-text-panel-open", Boolean(this.textPanelOpen));
       element?.toggleClass("is-selection-menu-open", Boolean(this.selectionMenuOpen));
+    }
+    if (visible && this.active && !this.drawingsLoaded && !this.loadingDrawings) {
+      this.ensureDrawingsLoaded().then(() => {
+        this.scheduleLayoutRefresh({ settle: false });
+      }).catch((error) => {
+        console.error(`[${PLUGIN_ID}] Failed to load drawings`, error);
+      });
     }
   }
   async ensureDrawingsLoaded() {
@@ -3103,21 +3117,27 @@ var PreviewDrawingController = class {
     this.scrollEventTarget = nextTarget;
     this.scrollEventTarget?.addEventListener("scroll", this.onScroll, { passive: true });
   }
-  scheduleLayoutRefresh() {
+  scheduleLayoutRefresh(options = {}) {
+    const settle = options.settle !== false;
     const generation = ++this.layoutRefreshGeneration;
     const refresh = () => {
       if (!this.destroyed && generation === this.layoutRefreshGeneration) {
-        this.scheduleResize();
+        if (this.active || this.drawingsLoaded || isElementVisibleEnough(this.previewEl)) {
+          this.scheduleResize();
+        }
       }
     };
     refresh();
     window.requestAnimationFrame?.(refresh);
-    window.requestAnimationFrame?.(() => window.requestAnimationFrame?.(refresh));
     window.setTimeout(refresh, 80);
     window.setTimeout(refresh, 350);
-    window.setTimeout(refresh, 800);
-    window.setTimeout(refresh, 1600);
-    window.setTimeout(refresh, 2600);
+    if (settle) {
+      window.requestAnimationFrame?.(() => window.requestAnimationFrame?.(refresh));
+      window.setTimeout(refresh, 900);
+      if (isMobileRuntime()) {
+        window.setTimeout(refresh, 1600);
+      }
+    }
   }
   scheduleMarkdownAnnotationRefresh() {
     if (this.markdownAnnotationTimer !== null || this.destroyed) {
@@ -4861,6 +4881,9 @@ var PreviewDrawingController = class {
   openFloatingTextInput(point, index = -1) {
     this.endFloatingTextInput(false);
     this.endTextEdit();
+    if (!this.drawingsVisible) {
+      this.setDrawingsVisible(true);
+    }
     const existing = index >= 0 ? this.drawingData.strokes[index] : null;
     const brushColor = this.currentBrushSettings().color || this.penColor;
     const preset = isTextLikeStroke(existing) ? existing : createTextPreset(this.textPreset, " ", brushColor);
@@ -4968,10 +4991,14 @@ var PreviewDrawingController = class {
       this.endFloatingTextInput(false, state);
       return;
     }
+    if (!this.drawingsVisible) {
+      this.setDrawingsVisible(true);
+    }
     if (state.index >= 0 && isTextLikeStroke(this.drawingData.strokes[state.index])) {
       const stroke = this.drawingData.strokes[state.index];
       stroke.text = text;
       stroke.render = normalizeTextRenderMode(stroke.render);
+      stroke.fontSize = clamp(Number(stroke.fontSize || 18), 10, 72);
       if (isRichTextStroke(stroke)) {
         stroke.previewWidth = stroke.previewWidth || 300;
         stroke.previewHeight = stroke.previewHeight || 180;
@@ -4991,7 +5018,7 @@ var PreviewDrawingController = class {
         count: 1,
         text: preset.text,
         render: preset.render || TEXT_RENDER_PLAIN,
-        fontSize: preset.fontSize,
+        fontSize: clamp(Number(preset.fontSize || 18), 10, 72),
         bold: preset.bold,
         code: preset.code,
         boxed: preset.boxed,
@@ -5012,6 +5039,7 @@ var PreviewDrawingController = class {
     this.redoStack = [];
     this.invalidateStaticCache();
     this.plugin.scheduleDrawingSave(this.file, this.drawingData);
+    this.scheduleLayoutRefresh({ settle: false });
     this.endFloatingTextInput(false, state);
     this.render();
   }
@@ -5063,6 +5091,9 @@ var PreviewDrawingController = class {
     this.openFloatingTextInput(snappedPoint);
   }
   insertTextPresetAt(point, presetId, text) {
+    if (!this.drawingsVisible) {
+      this.setDrawingsVisible(true);
+    }
     const brush = this.currentBrushSettings();
     const preset = createTextPreset(presetId, text, brush.color || this.penColor);
     const stroke = {
@@ -5074,7 +5105,7 @@ var PreviewDrawingController = class {
       count: 1,
       text: preset.text,
       render: preset.render || TEXT_RENDER_PLAIN,
-      fontSize: preset.fontSize,
+      fontSize: clamp(Number(preset.fontSize || 18), 10, 72),
       bold: preset.bold,
       code: preset.code,
       boxed: preset.boxed,
@@ -5093,6 +5124,7 @@ var PreviewDrawingController = class {
     this.redoStack = [];
     this.invalidateStaticCache();
     this.plugin.scheduleDrawingSave(this.file, this.drawingData);
+    this.scheduleLayoutRefresh({ settle: false });
     this.render();
   }
   async insertImportedAsset(fileLike, point) {

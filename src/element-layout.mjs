@@ -99,11 +99,19 @@ function normalizeRelation(relation) {
     return null;
   }
   const kind = ["intersection", "overlap", "near"].includes(relation.kind) ? relation.kind : "near";
+  const sourceU = Number(relation.sourceU);
+  const sourceV = Number(relation.sourceV);
+  const targetU = Number(relation.targetU);
+  const targetV = Number(relation.targetV);
   return {
     targetId: relation.targetId,
     kind,
     sourceCorner: CORNER_NAMES.includes(relation.sourceCorner) ? relation.sourceCorner : "topLeft",
     targetCorner: CORNER_NAMES.includes(relation.targetCorner) ? relation.targetCorner : "topLeft",
+    ...(Number.isFinite(sourceU) ? { sourceU: clamp(sourceU, 0, 1) } : {}),
+    ...(Number.isFinite(sourceV) ? { sourceV: clamp(sourceV, 0, 1) } : {}),
+    ...(Number.isFinite(targetU) ? { targetU: clamp(targetU, 0, 1) } : {}),
+    ...(Number.isFinite(targetV) ? { targetV: clamp(targetV, 0, 1) } : {}),
     dx: finite(relation.dx, 0),
     dy: finite(relation.dy, 0),
     weight: clamp(finite(relation.weight, kind === "near" ? 0.14 : 0.26), 0.05, 0.4)
@@ -254,10 +262,11 @@ function clampAxisRatio(scales, { maxXOverY = 1.65, maxYOverX = 1.9 } = {}) {
   if (yScale > xScale * maxYOverX) {
     yScale = xScale * maxYOverX;
   }
+  const scale = calculateVisualScale(xScale, yScale, scales.scale);
   return {
     xScale,
     yScale,
-    scale: Math.sqrt(Math.max(0.001, xScale * yScale))
+    scale
   };
 }
 
@@ -268,12 +277,23 @@ function blendScale(base, candidate, weight) {
   return Math.exp(Math.log(Math.max(0.001, base)) * (1 - weight) + Math.log(Math.max(0.001, candidate)) * weight);
 }
 
+function calculateVisualScale(xScaleInput, yScaleInput, baseScaleInput = 1) {
+  const xScale = Math.max(0.001, finite(xScaleInput, 1));
+  const yScale = Math.max(0.001, finite(yScaleInput, 1));
+  const geometric = Math.sqrt(xScale * yScale);
+  const baseScale = clamp(finite(baseScaleInput, geometric), 0.42, 2.4);
+  const widthProtected = blendScale(xScale, geometric, xScale < geometric ? 0.46 : 0.22);
+  const baseProtected = blendScale(widthProtected, baseScale, 0.34);
+  const sameWidthFloor = xScale >= 0.82 ? Math.min(xScale, baseScale) * 0.94 : 0.42;
+  return clamp(Math.max(geometric, baseProtected, sameWidthFloor), 0.42, 2.4);
+}
+
 export function calculateElementScales(sourceFrameInput, targetFrameInput, boxInput = {}) {
   const source = normalizeFrame(sourceFrameInput);
   const target = normalizeFrame(targetFrameInput);
   const box = normalizeBox(boxInput);
   const widthScale = clamp(target.contentWidth / source.contentWidth, 0.2, 5);
-  const documentScale = clamp(target.documentHeight / source.documentHeight, 0.2, 5);
+  const documentScale = clamp(target.documentHeight / source.documentHeight, 0.28, 3.6);
   const viewportScale = clamp(target.viewportHeight / source.viewportHeight, 0.25, 4);
   const aspectChange = target.aspectRatio / Math.max(0.01, source.aspectRatio);
   const widthWeight = aspectChange < 0.9 ? 0.8 : aspectChange > 1.35 ? 0.62 : 0.7;
@@ -288,8 +308,9 @@ export function calculateElementScales(sourceFrameInput, targetFrameInput, boxIn
   const wideTarget = target.aspectRatio > 1.05;
   let xScale = blendScale(widthScale, scale, portraitTarget ? 0.12 : 0.24);
   let yScale = Math.exp(
-    Math.log(documentScale) * (portraitTarget ? 0.74 : wideTarget ? 0.56 : 0.64) +
-    Math.log(viewportScale) * (portraitTarget ? 0.26 : wideTarget ? 0.44 : 0.36)
+    Math.log(documentScale) * (portraitTarget ? 0.58 : wideTarget ? 0.38 : 0.46) +
+    Math.log(viewportScale) * (portraitTarget ? 0.24 : wideTarget ? 0.34 : 0.3) +
+    Math.log(widthScale) * (portraitTarget ? 0.18 : wideTarget ? 0.28 : 0.24)
   );
   yScale = blendScale(yScale, scale, portraitTarget ? 0.1 : 0.22);
   xScale = clamp(Math.min(xScale, fitScale), 0.34, 2.8);
@@ -361,7 +382,7 @@ export function projectElementLayout(layoutInput, {
   const fitXScale = targetFrame.contentWidth * 0.98 / Math.max(1, layout.box.width);
   if (xScale > fitXScale) {
     xScale = fitXScale;
-    scale = Math.sqrt(Math.max(0.001, xScale * yScale));
+    scale = calculateVisualScale(xScale, yScale, scale);
   }
   let x = primary.x;
   if (projectedBottom && Number.isFinite(projectedBottom.x) && Math.abs(projectedBottom.x - primary.x) <= Math.max(24, layout.box.width * scale * 0.25)) {
@@ -401,6 +422,20 @@ function overlapArea(a, b) {
   return width * height;
 }
 
+function overlapCenter(a, b) {
+  const left = Math.max(a.x, b.x);
+  const right = Math.min(a.x + a.width, b.x + b.width);
+  const top = Math.max(a.y, b.y);
+  const bottom = Math.min(a.y + a.height, b.y + b.height);
+  if (right <= left || bottom <= top) {
+    return null;
+  }
+  return {
+    x: (left + right) / 2,
+    y: (top + bottom) / 2
+  };
+}
+
 function boxCorner(box, name) {
   return {
     x: box.x + (name === "topRight" || name === "bottomRight" ? box.width : 0),
@@ -421,6 +456,33 @@ function nearestCornerPair(source, target) {
     }
   }
   return best;
+}
+
+function normalizeBoxAnchor(box, point) {
+  return {
+    u: clamp((point.x - box.x) / Math.max(0.01, box.width), 0, 1),
+    v: clamp((point.y - box.y) / Math.max(0.01, box.height), 0, 1)
+  };
+}
+
+function relationBoxPoint(box, relation, prefix) {
+  const u = finite(relation?.[`${prefix}U`], NaN);
+  const v = finite(relation?.[`${prefix}V`], NaN);
+  if (Number.isFinite(u) && Number.isFinite(v)) {
+    return {
+      x: box.x + clamp(u, 0, 1) * box.width,
+      y: box.y + clamp(v, 0, 1) * box.height
+    };
+  }
+  return boxCorner(box, relation?.[`${prefix}Corner`]);
+}
+
+function relationBoxOffset(box, relation, prefix) {
+  const point = relationBoxPoint({ x: 0, y: 0, width: box.width, height: box.height }, relation, prefix);
+  return {
+    x: point.x,
+    y: point.y
+  };
 }
 
 export function captureElementRelations(items, { nearDistance = 80, maxRelations = 3 } = {}) {
@@ -479,19 +541,22 @@ export function captureElementRelations(items, { nearDistance = 80, maxRelations
       const kind = overlap > 0 ? "intersection" : "near";
       const relationScaleX = Math.max(0.05, (source.xScale + target.xScale) / 2);
       const relationScaleY = Math.max(0.05, (source.yScale + target.yScale) / 2);
-      const cornerPair = kind === "intersection"
-        ? { sourceCorner: "topLeft", targetCorner: "topLeft" }
-        : nearestCornerPair(source.bounds, target.bounds);
-      const sourceCornerPoint = boxCorner(source.bounds, cornerPair.sourceCorner);
-      const targetCornerPoint = boxCorner(target.bounds, cornerPair.targetCorner);
+      const cornerPair = nearestCornerPair(source.bounds, target.bounds);
+      const intersectionCenter = kind === "intersection" ? overlapCenter(source.bounds, target.bounds) : null;
+      const sourceAnchor = intersectionCenter ? normalizeBoxAnchor(source.bounds, intersectionCenter) : null;
+      const targetAnchor = intersectionCenter ? normalizeBoxAnchor(target.bounds, intersectionCenter) : null;
+      const sourceCornerPoint = intersectionCenter || boxCorner(source.bounds, cornerPair.sourceCorner);
+      const targetCornerPoint = intersectionCenter || boxCorner(target.bounds, cornerPair.targetCorner);
       candidates.push({
         targetId: target.id,
         kind,
         sourceCorner: cornerPair.sourceCorner,
         targetCorner: cornerPair.targetCorner,
+        ...(sourceAnchor ? { sourceU: sourceAnchor.u, sourceV: sourceAnchor.v } : {}),
+        ...(targetAnchor ? { targetU: targetAnchor.u, targetV: targetAnchor.v } : {}),
         dx: (targetCornerPoint.x - sourceCornerPoint.x) / relationScaleX,
         dy: (targetCornerPoint.y - sourceCornerPoint.y) / relationScaleY,
-        weight: kind === "intersection" ? 0.28 : 0.14,
+        weight: kind === "intersection" ? 0.32 : 0.14,
         score: kind === "intersection" ? -overlap - 1 : gap
       });
     }
@@ -520,8 +585,8 @@ export function stabilizeElementRelations(projectedItems, layouts) {
       }
       const relationScaleX = (finite(source.xScale, source.scale) + finite(target.xScale, target.scale)) / 2;
       const relationScaleY = (finite(source.yScale, source.scale) + finite(target.yScale, target.scale)) / 2;
-      const sourceOffset = boxCorner({ x: 0, y: 0, width: source.width, height: source.height }, relation.sourceCorner);
-      const targetCorner = boxCorner(target, relation.targetCorner);
+      const sourceOffset = relationBoxOffset(source, relation, "source");
+      const targetCorner = relationBoxPoint(target, relation, "target");
       const expectedX = targetCorner.x - relation.dx * relationScaleX - sourceOffset.x;
       const expectedY = targetCorner.y - relation.dy * relationScaleY - sourceOffset.y;
       const limitX = relation.kind === "near"

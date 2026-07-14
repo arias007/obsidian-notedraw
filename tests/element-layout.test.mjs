@@ -81,14 +81,20 @@ test("nearby floating elements preserve their relationship after reprojection", 
   assert.ok(Math.abs(stabilized[1].y - stabilized[0].y) < 80);
 });
 
-test("relations captured in a scaled pane are stored in source-frame units", () => {
+test("intersection relations use the overlap center as a cross-element anchor", () => {
   const relations = captureElementRelations([
     { id: "a", scale: 0.5, bounds: { minX: 50, minY: 50, maxX: 110, maxY: 110 } },
     { id: "b", scale: 0.5, bounds: { minX: 90, minY: 75, maxX: 150, maxY: 135 } }
   ]);
+  const relation = relations.get("a")[0];
 
-  assert.equal(relations.get("a")[0].dx, 80);
-  assert.equal(relations.get("a")[0].dy, 50);
+  assert.equal(relation.kind, "intersection");
+  assert.equal(relation.dx, 0);
+  assert.equal(relation.dy, 0);
+  assert.ok(relation.sourceU > 0.8 && relation.sourceU < 0.85);
+  assert.ok(relation.sourceV > 0.7 && relation.sourceV < 0.72);
+  assert.ok(relation.targetU > 0.16 && relation.targetU < 0.17);
+  assert.ok(relation.targetV > 0.29 && relation.targetV < 0.3);
 });
 
 test("near relations use the closest pair of element corners", () => {
@@ -182,6 +188,30 @@ test("adaptive element projection reshapes boxes for portrait and wide screens",
   assert.ok(wideMetrics.previewWidth > 320);
   assert.ok(wideMetrics.previewHeight < 200);
   assert.ok(wideBox.scale >= 0.42 && wideBox.scale <= 2.4);
+});
+
+test("reading and editing surfaces with similar content width keep visual text size stable", () => {
+  const layout = createElementLayout({
+    id: "same-width-reader",
+    bounds: { minX: 100, minY: 240, maxX: 300, maxY: 340 },
+    canvasWidth: 600,
+    canvasHeight: 2200,
+    viewportHeight: 800,
+    frame: { left: 60, width: 480 },
+    metrics: { width: 4, fontSize: 20, textWidth: 220 }
+  });
+  const projected = projectElementLayout(layout, {
+    canvasWidth: 600,
+    canvasHeight: 1150,
+    viewportHeight: 720,
+    frame: { left: 60, width: 480 }
+  });
+  const metrics = scaleElementMetrics(layout.metrics, projected);
+
+  assert.ok(projected.yScale < projected.xScale, "document-height differences may still flatten the element box");
+  assert.ok(projected.scale >= 0.94, "visual scale is protected from reading-view height shrinkage");
+  assert.ok(metrics.fontSize >= 18.8);
+  assert.ok(metrics.textWidth >= 210);
 });
 
 test("reciprocal relation cycles reduce drift without diverging", () => {
