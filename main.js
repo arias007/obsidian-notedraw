@@ -542,6 +542,7 @@ function calculateElementScales(sourceFrameInput, targetFrameInput, boxInput = {
   scale = clamp3(Math.min(scale, fitScale), 0.42, 2.4);
   const portraitTarget = target.aspectRatio < 0.62 || target.contentWidth < 430 && target.viewportHeight > target.contentWidth * 1.2;
   const wideTarget = target.aspectRatio > 1.05;
+  const sameContentLane = widthScale >= 0.82 && widthScale <= 1.2;
   let xScale = blendScale(widthScale, scale, portraitTarget ? 0.12 : 0.24);
   let yScale = Math.exp(
     Math.log(documentScale) * (portraitTarget ? 0.58 : wideTarget ? 0.38 : 0.46) + Math.log(viewportScale) * (portraitTarget ? 0.24 : wideTarget ? 0.34 : 0.3) + Math.log(widthScale) * (portraitTarget ? 0.18 : wideTarget ? 0.28 : 0.24)
@@ -549,6 +550,11 @@ function calculateElementScales(sourceFrameInput, targetFrameInput, boxInput = {
   yScale = blendScale(yScale, scale, portraitTarget ? 0.1 : 0.22);
   xScale = clamp3(Math.min(xScale, fitScale), 0.34, 2.8);
   yScale = clamp3(yScale, 0.34, 2.8);
+  if (sameContentLane) {
+    xScale = clamp3(blendScale(xScale, widthScale, 0.72), widthScale * 0.9, widthScale * 1.1);
+    yScale = clamp3(blendScale(yScale, widthScale, 0.82), widthScale * 0.9, widthScale * 1.12);
+    scale = calculateVisualScale(xScale, yScale, widthScale);
+  }
   if (portraitTarget) {
     return clampAxisRatio({ xScale, yScale, scale }, { maxXOverY: 1.25, maxYOverX: 2.15 });
   }
@@ -609,7 +615,14 @@ function projectElementLayout(layoutInput, {
   }
   const targetIsPortrait = targetFrame.aspectRatio < 0.62 || targetFrame.contentWidth < 430 && targetFrame.viewportHeight > targetFrame.contentWidth * 1.2;
   const targetIsWide = targetFrame.aspectRatio > 1.05;
+  const contentWidthScale = targetFrame.contentWidth / layout.sourceFrame.contentWidth;
+  const sameContentLane = contentWidthScale >= 0.82 && contentWidthScale <= 1.2;
   ({ xScale, yScale, scale } = clampAxisRatio({ xScale, yScale, scale }, targetIsPortrait ? { maxXOverY: 1.25, maxYOverX: 2.15 } : targetIsWide ? { maxXOverY: 1.75, maxYOverX: 1.45 } : { maxXOverY: 1.55, maxYOverX: 1.65 }));
+  if (sameContentLane) {
+    xScale = clamp3(blendScale(xScale, contentWidthScale, 0.5), contentWidthScale * 0.88, contentWidthScale * 1.12);
+    yScale = clamp3(blendScale(yScale, contentWidthScale, 0.62), contentWidthScale * 0.96, contentWidthScale * 1.08);
+    scale = calculateVisualScale(xScale, yScale, contentWidthScale);
+  }
   const fitXScale = targetFrame.contentWidth * 0.98 / Math.max(1, layout.box.width);
   if (xScale > fitXScale) {
     xScale = fitXScale;
@@ -700,13 +713,6 @@ function relationBoxPoint(box, relation, prefix) {
   }
   return boxCorner(box, relation?.[`${prefix}Corner`]);
 }
-function relationBoxOffset(box, relation, prefix) {
-  const point = relationBoxPoint({ x: 0, y: 0, width: box.width, height: box.height }, relation, prefix);
-  return {
-    x: point.x,
-    y: point.y
-  };
-}
 function captureElementRelations(items, { nearDistance = 80, maxRelations = 3 } = {}) {
   const normalized = (Array.isArray(items) ? items : []).map((item) => ({
     id: typeof item?.id === "string" ? item.id : "",
@@ -792,6 +798,14 @@ function stabilizeElementRelations(projectedItems, layouts) {
   const byId = new Map(projected.map((item) => [item.id, item]));
   const layoutsById = layouts instanceof Map ? layouts : new Map((Array.isArray(layouts) ? layouts : []).map((layout) => [layout?.id, layout]));
   const corrections = /* @__PURE__ */ new Map();
+  const visitedPairs = /* @__PURE__ */ new Set();
+  const addCorrection = (id, x, y, strength) => {
+    const current = corrections.get(id) || { x: 0, y: 0, weight: 0 };
+    current.x += x * strength;
+    current.y += y * strength;
+    current.weight += strength;
+    corrections.set(id, current);
+  };
   for (const source of projected) {
     const layout = normalizeElementLayout(layoutsById.get(source.id));
     if (!layout) {
@@ -802,19 +816,29 @@ function stabilizeElementRelations(projectedItems, layouts) {
       if (!target) {
         continue;
       }
+      const pairKey = source.id < target.id ? `${source.id}\0${target.id}` : `${target.id}\0${source.id}`;
+      if (visitedPairs.has(pairKey)) {
+        continue;
+      }
+      visitedPairs.add(pairKey);
       const relationScaleX = (finite2(source.xScale, source.scale) + finite2(target.xScale, target.scale)) / 2;
       const relationScaleY = (finite2(source.yScale, source.scale) + finite2(target.yScale, target.scale)) / 2;
-      const sourceOffset = relationBoxOffset(source, relation, "source");
-      const targetCorner = relationBoxPoint(target, relation, "target");
-      const expectedX = targetCorner.x - relation.dx * relationScaleX - sourceOffset.x;
-      const expectedY = targetCorner.y - relation.dy * relationScaleY - sourceOffset.y;
-      const limitX = relation.kind === "near" ? Math.min(72, Math.max(24, source.width * 0.35)) : Math.min(96, Math.max(32, source.width * 0.5));
-      const limitY = relation.kind === "near" ? Math.min(72, Math.max(24, source.height * 0.35)) : Math.min(96, Math.max(32, source.height * 0.5));
-      const current = corrections.get(source.id) || { x: 0, y: 0, weight: 0 };
-      current.x += clamp3(expectedX - source.x, -limitX, limitX) * relation.weight;
-      current.y += clamp3(expectedY - source.y, -limitY, limitY) * relation.weight;
-      current.weight += relation.weight;
-      corrections.set(source.id, current);
+      const sourcePoint = relationBoxPoint(source, relation, "source");
+      const targetPoint = relationBoxPoint(target, relation, "target");
+      const errorX = targetPoint.x - sourcePoint.x - relation.dx * relationScaleX;
+      const errorY = targetPoint.y - sourcePoint.y - relation.dy * relationScaleY;
+      const limitX = relation.kind === "near" ? Math.min(72, Math.max(24, Math.min(source.width, target.width) * 0.35)) : Math.min(96, Math.max(32, Math.min(source.width, target.width) * 0.5));
+      const limitY = relation.kind === "near" ? Math.min(72, Math.max(24, Math.min(source.height, target.height) * 0.35)) : Math.min(96, Math.max(32, Math.min(source.height, target.height) * 0.5));
+      const strength = relation.kind === "near" ? clamp3(relation.weight * 1.7, 0.16, 0.34) : clamp3(relation.weight * 1.7, 0.32, 0.62);
+      const sourceMobility = source.primaryAnchoredToLine ? 0.55 : 1;
+      const targetMobility = target.primaryAnchoredToLine ? 0.55 : 1;
+      const mobility = Math.max(0.01, sourceMobility + targetMobility);
+      const sourceShare = sourceMobility / mobility;
+      const targetShare = targetMobility / mobility;
+      const clampedErrorX = clamp3(errorX, -limitX, limitX);
+      const clampedErrorY = clamp3(errorY, -limitY, limitY);
+      addCorrection(source.id, clampedErrorX * sourceShare, clampedErrorY * sourceShare, strength);
+      addCorrection(target.id, -clampedErrorX * targetShare, -clampedErrorY * targetShare, strength);
     }
   }
   return projected.map((item) => {
@@ -823,7 +847,7 @@ function stabilizeElementRelations(projectedItems, layouts) {
       return item;
     }
     const divisor = Math.max(1e-3, correction.weight);
-    const blend = item.primaryAnchoredToLine ? 0.65 : 0.9;
+    const blend = Math.min(item.primaryAnchoredToLine ? 0.58 : 0.78, correction.weight);
     const nextX = item.x + correction.x / divisor * blend;
     const nextY = item.y + correction.y / divisor * blend;
     const anchorFenceX = Math.max(36, Math.min(120, item.width * (item.primaryAnchoredToLine ? 0.7 : 1.2)));
@@ -2294,7 +2318,7 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
       on: (eventName, listener) => this.onApiEvent(eventName, listener)
     };
     return {
-      version: "3.1.46",
+      version: "3.1.47",
       apiVersion: v1.apiVersion,
       capabilities,
       v1,
@@ -3466,6 +3490,7 @@ var PreviewDrawingController = class {
     this.onButtonPointerDown = this.onButtonPointerDown.bind(this);
     this.onButtonPointerUp = this.onButtonPointerUp.bind(this);
     this.onDocumentPointerDown = this.onDocumentPointerDown.bind(this);
+    this.onDocumentPointerFinish = this.onDocumentPointerFinish.bind(this);
     this.onDocumentSelectionChange = this.onDocumentSelectionChange.bind(this);
     this.onFormatToolbarDragMove = this.onFormatToolbarDragMove.bind(this);
     this.onFormatToolbarDragEnd = this.onFormatToolbarDragEnd.bind(this);
@@ -3638,6 +3663,8 @@ var PreviewDrawingController = class {
     window.visualViewport?.addEventListener("resize", this.onResize);
     window.visualViewport?.addEventListener("scroll", this.onResize);
     activeDocument.addEventListener("pointerdown", this.onDocumentPointerDown, true);
+    activeDocument.addEventListener("pointerup", this.onDocumentPointerFinish, true);
+    activeDocument.addEventListener("pointercancel", this.onDocumentPointerFinish, true);
     activeDocument.addEventListener("selectionchange", this.onDocumentSelectionChange);
     if (typeof ResizeObserver !== "undefined") {
       this.resizeObserver = new ResizeObserver(this.onResize);
@@ -3776,10 +3803,7 @@ var PreviewDrawingController = class {
     this.pointerDown = false;
     this.pointerStartEditable = null;
     this.activePointerId = null;
-    this.touchPointers.clear();
-    this.multiTouchScrolling = false;
-    this.multiTouchLastCenter = null;
-    this.suppressTouchDrawing = false;
+    this.resetTouchGestureState();
     this.draggingStroke = false;
     this.dragStrokeStartPoint = null;
     this.dragStrokeOriginalPoints = null;
@@ -3867,6 +3891,8 @@ var PreviewDrawingController = class {
     window.visualViewport?.removeEventListener("resize", this.onResize);
     window.visualViewport?.removeEventListener("scroll", this.onResize);
     activeDocument.removeEventListener("pointerdown", this.onDocumentPointerDown, true);
+    activeDocument.removeEventListener("pointerup", this.onDocumentPointerFinish, true);
+    activeDocument.removeEventListener("pointercancel", this.onDocumentPointerFinish, true);
     activeDocument.removeEventListener("selectionchange", this.onDocumentSelectionChange);
     this.stopFormatToolbarDrag();
     this.canvas?.removeEventListener("pointerdown", this.onPointerDown);
@@ -3951,6 +3977,10 @@ var PreviewDrawingController = class {
       this.cancelCurrentStroke();
       this.cancelSelectionDrag(true);
       this.cancelSelectedStrokeDrag(true);
+      this.cancelSelectedStrokeResize(true);
+      this.clearSelectedStrokes();
+      this.resetTouchGestureState();
+      this.render();
     } else if (this.active && eager && (!wasActive || !this.drawingsLoaded)) {
       this.ensureDrawingsLoaded().catch((error) => {
         console.error(`[${PLUGIN_ID}] Failed to load drawings`, error);
@@ -5165,6 +5195,11 @@ var PreviewDrawingController = class {
       }
     }
   }
+  onDocumentPointerFinish(event) {
+    if (event.pointerType === "touch" && this.touchPointers.has(event.pointerId)) {
+      this.completeTrackedTouch(event.pointerId);
+    }
+  }
   projectStrokePointsForLayoutRepair(stroke, context, layout) {
     const lineToCanvasY = (path, line) => this.projectLineLocation(path, line, context);
     const sourceFrame = layout?.sourceFrame;
@@ -5386,6 +5421,9 @@ var PreviewDrawingController = class {
       return;
     }
     if (event.pointerType === "touch") {
+      if (event.isPrimary && this.touchPointers.size && !this.pointerDown && this.activePointerId === null) {
+        this.resetTouchGestureState();
+      }
       this.touchPointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
       if (this.suppressTouchDrawing || this.touchPointers.size >= 2) {
         this.startMultiTouchScroll(event);
@@ -5607,18 +5645,8 @@ var PreviewDrawingController = class {
       return;
     }
     if (event.pointerType === "touch") {
-      if (this.touchPointers.has(event.pointerId)) {
-        this.touchPointers.delete(event.pointerId);
-      }
+      this.completeTrackedTouch(event.pointerId);
       if (this.multiTouchScrolling || this.suppressTouchDrawing) {
-        if (this.touchPointers.size < 2) {
-          this.multiTouchScrolling = false;
-          this.multiTouchLastCenter = null;
-          this.previewEl.removeClass("is-two-finger-scroll");
-        }
-        if (this.touchPointers.size === 0) {
-          this.suppressTouchDrawing = false;
-        }
         event.preventDefault();
         event.stopPropagation();
         return;
@@ -5806,11 +5834,15 @@ var PreviewDrawingController = class {
     });
     state.centered = placement.centered;
     if (state.index < 0) {
-      const placedRect = textarea.getBoundingClientRect();
-      state.commitPoint = this.eventToPoint({
-        clientX: placedRect.left + insets.left,
-        clientY: placedRect.top + insets.top
-      });
+      if (placement.centered) {
+        const placedRect = textarea.getBoundingClientRect();
+        state.commitPoint = this.eventToPoint({
+          clientX: placedRect.left + insets.left,
+          clientY: placedRect.top + insets.top
+        });
+      } else {
+        state.commitPoint = { ...state.point };
+      }
     }
   }
   floatingTextContentWidth(element) {
@@ -5976,6 +6008,7 @@ var PreviewDrawingController = class {
     this.scheduleLayoutRefresh({ settle: false });
     this.endFloatingTextInput(false, state);
     this.render();
+    this.requestRender(true);
   }
   endFloatingTextInput(commit = true, state = this.floatingTextInput) {
     if (!state) {
@@ -6146,6 +6179,30 @@ var PreviewDrawingController = class {
     this.cancelSelectedStrokeDrag(true);
     event.preventDefault();
     event.stopPropagation();
+  }
+  completeTrackedTouch(pointerId) {
+    if (!this.touchPointers.has(pointerId)) {
+      return false;
+    }
+    this.touchPointers.delete(pointerId);
+    if (this.touchPointers.size < 2) {
+      this.multiTouchScrolling = false;
+      this.multiTouchLastCenter = null;
+      this.previewEl.removeClass("is-two-finger-scroll");
+    }
+    if (this.touchPointers.size === 0) {
+      this.suppressTouchDrawing = false;
+      this.scheduleResize();
+      this.requestRender(true);
+    }
+    return true;
+  }
+  resetTouchGestureState() {
+    this.touchPointers.clear();
+    this.multiTouchScrolling = false;
+    this.multiTouchLastCenter = null;
+    this.suppressTouchDrawing = false;
+    this.previewEl?.removeClass("is-two-finger-scroll");
   }
   handleMultiTouchScroll(event) {
     const center = this.getTouchCenter();

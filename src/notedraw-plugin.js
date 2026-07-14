@@ -1335,7 +1335,7 @@ var NoteDrawPlugin = class extends Plugin {
       on: (eventName, listener) => this.onApiEvent(eventName, listener)
     };
     return {
-      version: "3.1.46",
+      version: "3.1.47",
       apiVersion: v1.apiVersion,
       capabilities,
       v1,
@@ -2513,6 +2513,7 @@ var PreviewDrawingController = class {
     this.onButtonPointerDown = this.onButtonPointerDown.bind(this);
     this.onButtonPointerUp = this.onButtonPointerUp.bind(this);
     this.onDocumentPointerDown = this.onDocumentPointerDown.bind(this);
+    this.onDocumentPointerFinish = this.onDocumentPointerFinish.bind(this);
     this.onDocumentSelectionChange = this.onDocumentSelectionChange.bind(this);
     this.onFormatToolbarDragMove = this.onFormatToolbarDragMove.bind(this);
     this.onFormatToolbarDragEnd = this.onFormatToolbarDragEnd.bind(this);
@@ -2685,6 +2686,8 @@ var PreviewDrawingController = class {
     window.visualViewport?.addEventListener("resize", this.onResize);
     window.visualViewport?.addEventListener("scroll", this.onResize);
     activeDocument.addEventListener("pointerdown", this.onDocumentPointerDown, true);
+    activeDocument.addEventListener("pointerup", this.onDocumentPointerFinish, true);
+    activeDocument.addEventListener("pointercancel", this.onDocumentPointerFinish, true);
     activeDocument.addEventListener("selectionchange", this.onDocumentSelectionChange);
     if (typeof ResizeObserver !== "undefined") {
       this.resizeObserver = new ResizeObserver(this.onResize);
@@ -2823,10 +2826,7 @@ var PreviewDrawingController = class {
     this.pointerDown = false;
     this.pointerStartEditable = null;
     this.activePointerId = null;
-    this.touchPointers.clear();
-    this.multiTouchScrolling = false;
-    this.multiTouchLastCenter = null;
-    this.suppressTouchDrawing = false;
+    this.resetTouchGestureState();
     this.draggingStroke = false;
     this.dragStrokeStartPoint = null;
     this.dragStrokeOriginalPoints = null;
@@ -2914,6 +2914,8 @@ var PreviewDrawingController = class {
     window.visualViewport?.removeEventListener("resize", this.onResize);
     window.visualViewport?.removeEventListener("scroll", this.onResize);
     activeDocument.removeEventListener("pointerdown", this.onDocumentPointerDown, true);
+    activeDocument.removeEventListener("pointerup", this.onDocumentPointerFinish, true);
+    activeDocument.removeEventListener("pointercancel", this.onDocumentPointerFinish, true);
     activeDocument.removeEventListener("selectionchange", this.onDocumentSelectionChange);
     this.stopFormatToolbarDrag();
     this.canvas?.removeEventListener("pointerdown", this.onPointerDown);
@@ -2998,6 +3000,10 @@ var PreviewDrawingController = class {
       this.cancelCurrentStroke();
       this.cancelSelectionDrag(true);
       this.cancelSelectedStrokeDrag(true);
+      this.cancelSelectedStrokeResize(true);
+      this.clearSelectedStrokes();
+      this.resetTouchGestureState();
+      this.render();
     } else if (this.active && eager && (!wasActive || !this.drawingsLoaded)) {
       this.ensureDrawingsLoaded().catch((error) => {
         console.error(`[${PLUGIN_ID}] Failed to load drawings`, error);
@@ -4221,6 +4227,11 @@ var PreviewDrawingController = class {
       }
     }
   }
+  onDocumentPointerFinish(event) {
+    if (event.pointerType === "touch" && this.touchPointers.has(event.pointerId)) {
+      this.completeTrackedTouch(event.pointerId);
+    }
+  }
   projectStrokePointsForLayoutRepair(stroke, context, layout) {
     const lineToCanvasY = (path, line) => this.projectLineLocation(path, line, context);
     const sourceFrame = layout?.sourceFrame;
@@ -4443,6 +4454,9 @@ var PreviewDrawingController = class {
       return;
     }
     if (event.pointerType === "touch") {
+      if (event.isPrimary && this.touchPointers.size && !this.pointerDown && this.activePointerId === null) {
+        this.resetTouchGestureState();
+      }
       this.touchPointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
       if (this.suppressTouchDrawing || this.touchPointers.size >= 2) {
         this.startMultiTouchScroll(event);
@@ -4664,18 +4678,8 @@ var PreviewDrawingController = class {
       return;
     }
     if (event.pointerType === "touch") {
-      if (this.touchPointers.has(event.pointerId)) {
-        this.touchPointers.delete(event.pointerId);
-      }
+      this.completeTrackedTouch(event.pointerId);
       if (this.multiTouchScrolling || this.suppressTouchDrawing) {
-        if (this.touchPointers.size < 2) {
-          this.multiTouchScrolling = false;
-          this.multiTouchLastCenter = null;
-          this.previewEl.removeClass("is-two-finger-scroll");
-        }
-        if (this.touchPointers.size === 0) {
-          this.suppressTouchDrawing = false;
-        }
         event.preventDefault();
         event.stopPropagation();
         return;
@@ -4866,11 +4870,15 @@ var PreviewDrawingController = class {
     });
     state.centered = placement.centered;
     if (state.index < 0) {
-      const placedRect = textarea.getBoundingClientRect();
-      state.commitPoint = this.eventToPoint({
-        clientX: placedRect.left + insets.left,
-        clientY: placedRect.top + insets.top
-      });
+      if (placement.centered) {
+        const placedRect = textarea.getBoundingClientRect();
+        state.commitPoint = this.eventToPoint({
+          clientX: placedRect.left + insets.left,
+          clientY: placedRect.top + insets.top
+        });
+      } else {
+        state.commitPoint = { ...state.point };
+      }
     }
   }
   floatingTextContentWidth(element) {
@@ -5042,6 +5050,7 @@ var PreviewDrawingController = class {
     this.scheduleLayoutRefresh({ settle: false });
     this.endFloatingTextInput(false, state);
     this.render();
+    this.requestRender(true);
   }
   endFloatingTextInput(commit = true, state = this.floatingTextInput) {
     if (!state) {
@@ -5212,6 +5221,30 @@ var PreviewDrawingController = class {
     this.cancelSelectedStrokeDrag(true);
     event.preventDefault();
     event.stopPropagation();
+  }
+  completeTrackedTouch(pointerId) {
+    if (!this.touchPointers.has(pointerId)) {
+      return false;
+    }
+    this.touchPointers.delete(pointerId);
+    if (this.touchPointers.size < 2) {
+      this.multiTouchScrolling = false;
+      this.multiTouchLastCenter = null;
+      this.previewEl.removeClass("is-two-finger-scroll");
+    }
+    if (this.touchPointers.size === 0) {
+      this.suppressTouchDrawing = false;
+      this.scheduleResize();
+      this.requestRender(true);
+    }
+    return true;
+  }
+  resetTouchGestureState() {
+    this.touchPointers.clear();
+    this.multiTouchScrolling = false;
+    this.multiTouchLastCenter = null;
+    this.suppressTouchDrawing = false;
+    this.previewEl?.removeClass("is-two-finger-scroll");
   }
   handleMultiTouchScroll(event) {
     const center = this.getTouchCenter();

@@ -306,6 +306,7 @@ export function calculateElementScales(sourceFrameInput, targetFrameInput, boxIn
   scale = clamp(Math.min(scale, fitScale), 0.42, 2.4);
   const portraitTarget = target.aspectRatio < 0.62 || target.contentWidth < 430 && target.viewportHeight > target.contentWidth * 1.2;
   const wideTarget = target.aspectRatio > 1.05;
+  const sameContentLane = widthScale >= 0.82 && widthScale <= 1.2;
   let xScale = blendScale(widthScale, scale, portraitTarget ? 0.12 : 0.24);
   let yScale = Math.exp(
     Math.log(documentScale) * (portraitTarget ? 0.58 : wideTarget ? 0.38 : 0.46) +
@@ -315,6 +316,11 @@ export function calculateElementScales(sourceFrameInput, targetFrameInput, boxIn
   yScale = blendScale(yScale, scale, portraitTarget ? 0.1 : 0.22);
   xScale = clamp(Math.min(xScale, fitScale), 0.34, 2.8);
   yScale = clamp(yScale, 0.34, 2.8);
+  if (sameContentLane) {
+    xScale = clamp(blendScale(xScale, widthScale, 0.72), widthScale * 0.9, widthScale * 1.1);
+    yScale = clamp(blendScale(yScale, widthScale, 0.82), widthScale * 0.9, widthScale * 1.12);
+    scale = calculateVisualScale(xScale, yScale, widthScale);
+  }
   if (portraitTarget) {
     return clampAxisRatio({ xScale, yScale, scale }, { maxXOverY: 1.25, maxYOverX: 2.15 });
   }
@@ -376,9 +382,16 @@ export function projectElementLayout(layoutInput, {
   }
   const targetIsPortrait = targetFrame.aspectRatio < 0.62 || targetFrame.contentWidth < 430 && targetFrame.viewportHeight > targetFrame.contentWidth * 1.2;
   const targetIsWide = targetFrame.aspectRatio > 1.05;
+  const contentWidthScale = targetFrame.contentWidth / layout.sourceFrame.contentWidth;
+  const sameContentLane = contentWidthScale >= 0.82 && contentWidthScale <= 1.2;
   ({ xScale, yScale, scale } = clampAxisRatio({ xScale, yScale, scale }, targetIsPortrait
     ? { maxXOverY: 1.25, maxYOverX: 2.15 }
     : targetIsWide ? { maxXOverY: 1.75, maxYOverX: 1.45 } : { maxXOverY: 1.55, maxYOverX: 1.65 }));
+  if (sameContentLane) {
+    xScale = clamp(blendScale(xScale, contentWidthScale, 0.5), contentWidthScale * 0.88, contentWidthScale * 1.12);
+    yScale = clamp(blendScale(yScale, contentWidthScale, 0.62), contentWidthScale * 0.96, contentWidthScale * 1.08);
+    scale = calculateVisualScale(xScale, yScale, contentWidthScale);
+  }
   const fitXScale = targetFrame.contentWidth * 0.98 / Math.max(1, layout.box.width);
   if (xScale > fitXScale) {
     xScale = fitXScale;
@@ -477,14 +490,6 @@ function relationBoxPoint(box, relation, prefix) {
   return boxCorner(box, relation?.[`${prefix}Corner`]);
 }
 
-function relationBoxOffset(box, relation, prefix) {
-  const point = relationBoxPoint({ x: 0, y: 0, width: box.width, height: box.height }, relation, prefix);
-  return {
-    x: point.x,
-    y: point.y
-  };
-}
-
 export function captureElementRelations(items, { nearDistance = 80, maxRelations = 3 } = {}) {
   const normalized = (Array.isArray(items) ? items : []).map((item) => ({
     id: typeof item?.id === "string" ? item.id : "",
@@ -573,6 +578,14 @@ export function stabilizeElementRelations(projectedItems, layouts) {
     ? layouts
     : new Map((Array.isArray(layouts) ? layouts : []).map((layout) => [layout?.id, layout]));
   const corrections = new Map();
+  const visitedPairs = new Set();
+  const addCorrection = (id, x, y, strength) => {
+    const current = corrections.get(id) || { x: 0, y: 0, weight: 0 };
+    current.x += x * strength;
+    current.y += y * strength;
+    current.weight += strength;
+    corrections.set(id, current);
+  };
   for (const source of projected) {
     const layout = normalizeElementLayout(layoutsById.get(source.id));
     if (!layout) {
@@ -583,23 +596,35 @@ export function stabilizeElementRelations(projectedItems, layouts) {
       if (!target) {
         continue;
       }
+      const pairKey = source.id < target.id ? `${source.id}\u0000${target.id}` : `${target.id}\u0000${source.id}`;
+      if (visitedPairs.has(pairKey)) {
+        continue;
+      }
+      visitedPairs.add(pairKey);
       const relationScaleX = (finite(source.xScale, source.scale) + finite(target.xScale, target.scale)) / 2;
       const relationScaleY = (finite(source.yScale, source.scale) + finite(target.yScale, target.scale)) / 2;
-      const sourceOffset = relationBoxOffset(source, relation, "source");
-      const targetCorner = relationBoxPoint(target, relation, "target");
-      const expectedX = targetCorner.x - relation.dx * relationScaleX - sourceOffset.x;
-      const expectedY = targetCorner.y - relation.dy * relationScaleY - sourceOffset.y;
+      const sourcePoint = relationBoxPoint(source, relation, "source");
+      const targetPoint = relationBoxPoint(target, relation, "target");
+      const errorX = targetPoint.x - sourcePoint.x - relation.dx * relationScaleX;
+      const errorY = targetPoint.y - sourcePoint.y - relation.dy * relationScaleY;
       const limitX = relation.kind === "near"
-        ? Math.min(72, Math.max(24, source.width * 0.35))
-        : Math.min(96, Math.max(32, source.width * 0.5));
+        ? Math.min(72, Math.max(24, Math.min(source.width, target.width) * 0.35))
+        : Math.min(96, Math.max(32, Math.min(source.width, target.width) * 0.5));
       const limitY = relation.kind === "near"
-        ? Math.min(72, Math.max(24, source.height * 0.35))
-        : Math.min(96, Math.max(32, source.height * 0.5));
-      const current = corrections.get(source.id) || { x: 0, y: 0, weight: 0 };
-      current.x += clamp(expectedX - source.x, -limitX, limitX) * relation.weight;
-      current.y += clamp(expectedY - source.y, -limitY, limitY) * relation.weight;
-      current.weight += relation.weight;
-      corrections.set(source.id, current);
+        ? Math.min(72, Math.max(24, Math.min(source.height, target.height) * 0.35))
+        : Math.min(96, Math.max(32, Math.min(source.height, target.height) * 0.5));
+      const strength = relation.kind === "near"
+        ? clamp(relation.weight * 1.7, 0.16, 0.34)
+        : clamp(relation.weight * 1.7, 0.32, 0.62);
+      const sourceMobility = source.primaryAnchoredToLine ? 0.55 : 1;
+      const targetMobility = target.primaryAnchoredToLine ? 0.55 : 1;
+      const mobility = Math.max(0.01, sourceMobility + targetMobility);
+      const sourceShare = sourceMobility / mobility;
+      const targetShare = targetMobility / mobility;
+      const clampedErrorX = clamp(errorX, -limitX, limitX);
+      const clampedErrorY = clamp(errorY, -limitY, limitY);
+      addCorrection(source.id, clampedErrorX * sourceShare, clampedErrorY * sourceShare, strength);
+      addCorrection(target.id, -clampedErrorX * targetShare, -clampedErrorY * targetShare, strength);
     }
   }
   return projected.map((item) => {
@@ -608,7 +633,7 @@ export function stabilizeElementRelations(projectedItems, layouts) {
       return item;
     }
     const divisor = Math.max(0.001, correction.weight);
-    const blend = item.primaryAnchoredToLine ? 0.65 : 0.9;
+    const blend = Math.min(item.primaryAnchoredToLine ? 0.58 : 0.78, correction.weight);
     const nextX = item.x + (correction.x / divisor) * blend;
     const nextY = item.y + (correction.y / divisor) * blend;
     const anchorFenceX = Math.max(36, Math.min(120, item.width * (item.primaryAnchoredToLine ? 0.7 : 1.2)));

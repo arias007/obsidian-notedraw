@@ -27,15 +27,15 @@ test("the stable v1 API exposes Cancip-friendly capabilities and events", async 
   assert.match(source, /on: \(eventName, listener\) => this\.onApiEvent\(eventName, listener\)/);
 });
 
-test("3.1.46 projects stable element frames without eager hidden-view refresh", async () => {
+test("3.1.47 stabilizes element frames and input recovery without eager hidden-view refresh", async () => {
   const [source, manifestText] = await Promise.all([
     readFile(sourceUrl, "utf8"),
     readFile(manifestUrl, "utf8")
   ]);
   const manifest = JSON.parse(manifestText);
 
-  assert.equal(manifest.version, "3.1.46");
-  assert.match(source, /version: "3\.1\.46"/);
+  assert.equal(manifest.version, "3.1.47");
+  assert.match(source, /version: "3\.1\.47"/);
   assert.match(source, /if \(!this\.responsivePointsInitialized \|\| signature !== this\.responsiveLayoutSignature\)/);
   assert.match(source, /migratedDrawingData\.version = Math\.max\(3/);
   assert.match(source, /captureElementLayoutForStroke/);
@@ -107,4 +107,22 @@ test("floating text editing keeps one anchor and survives multiline IME input", 
   assert.match(source, /this\.scheduleLayoutRefresh\(\{ settle: false \}\)/);
   assert.match(source, /stroke\.textWidth = this\.floatingTextContentWidth/);
   assert.match(source, /layout\.lines\.forEach/);
+  assert.match(source, /if \(placement\.centered\) \{[\s\S]*state\.commitPoint = this\.eventToPoint[\s\S]*\} else \{\s*state\.commitPoint = \{ \.\.\.state\.point \}/);
+  assert.match(source, /this\.endFloatingTextInput\(false, state\);\s*this\.render\(\);\s*this\.requestRender\(true\)/);
+});
+
+test("two-finger scrolling always releases touch suppression before the next stroke", async () => {
+  const source = await readFile(sourceUrl, "utf8");
+
+  assert.match(source, /activeDocument\.addEventListener\("pointerup", this\.onDocumentPointerFinish, true\)/);
+  assert.match(source, /activeDocument\.addEventListener\("pointercancel", this\.onDocumentPointerFinish, true\)/);
+  assert.match(source, /onDocumentPointerFinish\(event\)[\s\S]*this\.completeTrackedTouch\(event\.pointerId\)/);
+  assert.match(source, /event\.isPrimary && this\.touchPointers\.size && !this\.pointerDown && this\.activePointerId === null[\s\S]*this\.resetTouchGestureState\(\)/);
+  assert.match(source, /completeTrackedTouch\(pointerId\)[\s\S]*this\.touchPointers\.size === 0[\s\S]*this\.suppressTouchDrawing = false[\s\S]*this\.scheduleResize\(\)[\s\S]*this\.requestRender\(true\)/);
+});
+
+test("deactivating the wand promotes selected text and drawings back into the static canvas", async () => {
+  const source = await readFile(sourceUrl, "utf8");
+
+  assert.match(source, /if \(!this\.active && wasActive\)[\s\S]*this\.clearSelectedStrokes\(\);[\s\S]*this\.resetTouchGestureState\(\);[\s\S]*this\.render\(\)/);
 });

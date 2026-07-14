@@ -209,9 +209,39 @@ test("reading and editing surfaces with similar content width keep visual text s
   const metrics = scaleElementMetrics(layout.metrics, projected);
 
   assert.ok(projected.yScale < projected.xScale, "document-height differences may still flatten the element box");
+  assert.ok(projected.yScale >= 0.96, "same-width reading and editing surfaces keep element height nearly unchanged");
   assert.ok(projected.scale >= 0.94, "visual scale is protected from reading-view height shrinkage");
   assert.ok(metrics.fontSize >= 18.8);
   assert.ok(metrics.textWidth >= 210);
+});
+
+test("same-width view changes do not let different Markdown line heights shrink elements", () => {
+  const layout = createElementLayout({
+    id: "same-lane-lines",
+    bounds: { minX: 100, minY: 240, maxX: 300, maxY: 340 },
+    canvasWidth: 600,
+    canvasHeight: 2200,
+    viewportHeight: 800,
+    frame: { left: 60, width: 480 },
+    sourcePath: "Notes/example.md",
+    cornerLocations: {
+      topLeft: { path: "Notes/example.md", line: 10, lineConfidence: 1 },
+      topRight: { path: "Notes/example.md", line: 10, lineConfidence: 1 },
+      bottomLeft: { path: "Notes/example.md", line: 20, lineConfidence: 1 },
+      bottomRight: { path: "Notes/example.md", line: 20, lineConfidence: 1 }
+    }
+  });
+  const projected = projectElementLayout(layout, {
+    canvasWidth: 600,
+    canvasHeight: 1150,
+    viewportHeight: 720,
+    frame: { left: 60, width: 480 },
+    lineToCanvasY: (path, line) => path === "Notes/example.md" ? 300 + (line - 10) * 5 : NaN
+  });
+
+  assert.equal(projected.y, 300);
+  assert.ok(projected.yScale >= 0.96);
+  assert.ok(projected.height >= 96);
 });
 
 test("reciprocal relation cycles reduce drift without diverging", () => {
@@ -292,9 +322,44 @@ test("relation stabilization pulls elements together while respecting note ancho
     { id: "relation-anchor-b", x: 360, y: 100, width: 120, height: 100, scale: 1, anchorX: 360, anchorY: 100, primaryAnchoredToLine: true }
   ];
   const after = stabilizeElementRelations(before, new Map([[first.id, first], [second.id, second]]));
+  const beforeError = Math.abs((before[1].x - (before[0].x + before[0].width)) - 20);
+  const afterError = Math.abs((after[1].x - (after[0].x + after[0].width)) - 20);
 
-  assert.ok(after[0].x > before[0].x + 20);
-  assert.ok(after[0].x <= before[0].anchorX + 84);
+  assert.ok(afterError < beforeError);
+  assert.ok(after[0].x > before[0].x && after[0].x < before[0].x + 20);
+  assert.ok(after[1].x < before[1].x && after[1].x > before[1].x - 20);
+  assert.ok(Math.abs((after[0].x - before[0].x) + (after[1].x - before[1].x)) < 1e-9);
+});
+
+test("intersection anchors reduce cross-point drift without swapping element order", () => {
+  const first = makeLayout("cross-a", 100, 100, 120, 100);
+  const second = makeLayout("cross-b", 180, 130, 120, 100);
+  const relations = captureElementRelations([
+    { id: first.id, bounds: { minX: 100, minY: 100, maxX: 220, maxY: 200 } },
+    { id: second.id, bounds: { minX: 180, minY: 130, maxX: 300, maxY: 230 } }
+  ]);
+  first.relations = relations.get(first.id);
+  second.relations = relations.get(second.id);
+  const before = [
+    { id: first.id, x: 100, y: 100, width: 120, height: 100, scale: 1, xScale: 1, yScale: 1 },
+    { id: second.id, x: 230, y: 170, width: 120, height: 100, scale: 1, xScale: 1, yScale: 1 }
+  ];
+  const relation = first.relations[0];
+  const crossError = (items) => {
+    const source = items[0];
+    const target = items[1];
+    const sourceX = source.x + relation.sourceU * source.width;
+    const sourceY = source.y + relation.sourceV * source.height;
+    const targetX = target.x + relation.targetU * target.width;
+    const targetY = target.y + relation.targetV * target.height;
+    return Math.hypot(targetX - sourceX, targetY - sourceY);
+  };
+  const after = stabilizeElementRelations(before, new Map([[first.id, first], [second.id, second]]));
+
+  assert.ok(crossError(after) < crossError(before));
+  assert.ok(after[0].x < after[1].x);
+  assert.ok(Math.abs(after[0].x - before[0].x) < 30);
+  assert.ok(Math.abs(after[1].x - before[1].x) < 30);
 });
 
 test("unstable transition frames are repaired instead of trusted as source layouts", () => {
