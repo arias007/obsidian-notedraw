@@ -27,15 +27,15 @@ test("the stable v1 API exposes Cancip-friendly capabilities and events", async 
   assert.match(source, /on: \(eventName, listener\) => this\.onApiEvent\(eventName, listener\)/);
 });
 
-test("3.1.49 stabilizes text commits and cross-view frames without eager hidden-view refresh", async () => {
+test("3.1.50 preserves bottom coordinates and cross-view frames without eager hidden-view refresh", async () => {
   const [source, manifestText] = await Promise.all([
     readFile(sourceUrl, "utf8"),
     readFile(manifestUrl, "utf8")
   ]);
   const manifest = JSON.parse(manifestText);
 
-  assert.equal(manifest.version, "3.1.49");
-  assert.match(source, /version: "3\.1\.49"/);
+  assert.equal(manifest.version, "3.1.50");
+  assert.match(source, /version: "3\.1\.50"/);
   assert.match(source, /if \(!this\.responsivePointsInitialized \|\| signature !== this\.responsiveLayoutSignature\)/);
   assert.match(source, /migratedDrawingData\.version = Math\.max\(3/);
   assert.match(source, /captureElementLayoutForStroke/);
@@ -139,8 +139,21 @@ test("non-empty floating text commits before wand, view, file, or controller tea
 });
 
 test("runtime layout uses a capped desktop Markdown lane and mobile-aware vertical flow", async () => {
-  const source = await readFile(sourceUrl, "utf8");
+  const [source, styles] = await Promise.all([
+    readFile(sourceUrl, "utf8"),
+    readFile(stylesUrl, "utf8")
+  ]);
 
   assert.match(source, /constrainWideContentFrame\(\{\s*surfaceWidth,[\s\S]*contentWidth: contentRect\.width[\s\S]*\}, \{ isMobile: isMobileRuntime\(\) \}\)/);
   assert.match(source, /preferDocumentFlow: isMobileRuntime\(\)/);
+  assert.match(source, /estimateElementLayoutExtent/);
+  assert.match(source, /relativeRight/);
+  assert.match(source, /relativeBottom/);
+  assert.match(source, /annotateRenderedMarkdownLines/);
+  assert.match(source, /collectVirtualMarkdownLineAnchors/);
+  assert.match(source, /buildVirtualMarkdownSectionAnchors/);
+  assert.match(source, /app\.vault\.cachedRead\(file\)/);
+  assert.match(source, /matchRenderedTextToMarkdown/);
+  assert.match(source, /let boxHit = -1[\s\S]*isTextLikeStroke\(stroke\) \|\| isEmbedStroke\(stroke\)[\s\S]*return index;[\s\S]*return boxHit/);
+  assert.match(styles, /is-notedraw-source-shell \.notedraw-embed-layer \{\s*z-index: 18;/);
 });

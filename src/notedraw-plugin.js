@@ -30,12 +30,15 @@ import {
   captureElementRelations,
   createElementLayout,
   elementLayoutNeedsRepair,
+  estimateElementLayoutExtent,
   normalizeElementLayout,
   projectElementLayout,
   projectElementPoints,
   scaleElementMetrics,
   stabilizeElementRelations
 } from "./element-layout.mjs";
+import { matchRenderedTextToMarkdown } from "./markdown-anchors.mjs";
+import { buildVirtualMarkdownSectionAnchors } from "./markdown-section-anchors.mjs";
 import {
   computeTextLayout,
   placeFloatingTextEditor
@@ -1336,7 +1339,7 @@ var NoteDrawPlugin = class extends Plugin {
       on: (eventName, listener) => this.onApiEvent(eventName, listener)
     };
     return {
-      version: "3.1.49",
+      version: "3.1.50",
       apiVersion: v1.apiVersion,
       capabilities,
       v1,
@@ -2700,6 +2703,7 @@ var PreviewDrawingController = class {
     }
     this.refreshScrollContainer();
     annotateVisibleMarkdownElements(this.plugin.app, this.previewEl, this.file.path);
+    this.scheduleMarkdownAnnotationRefresh();
     if (typeof MutationObserver !== "undefined") {
       this.markdownRenderObserver = new MutationObserver((mutations) => {
         if (mutations.some((mutation) => isMarkdownContentMutation(mutation))) {
@@ -3157,11 +3161,18 @@ var PreviewDrawingController = class {
         return;
       }
       annotateVisibleMarkdownElements(this.plugin.app, this.previewEl, this.file.path);
-      this.responsiveLayoutContext = null;
-      if (this.drawingsLoaded) {
-        this.responsiveLayoutSignature = "";
-        this.scheduleResize();
-      }
+      annotateRenderedMarkdownLines(this.plugin.app, this.previewEl, this.file.path).catch((error) => {
+        void error;
+      }).finally(() => {
+        if (this.destroyed || !this.previewEl?.isConnected) {
+          return;
+        }
+        this.responsiveLayoutContext = null;
+        if (this.drawingsLoaded) {
+          this.responsiveLayoutSignature = "";
+          this.scheduleResize();
+        }
+      });
     }, 120);
   }
   updateFloatingControlsPosition() {
@@ -4096,7 +4107,10 @@ var PreviewDrawingController = class {
     this.responsiveLayoutContext = {
       frame: this.getResponsiveContentFrame(),
       viewportHeight: measureResponsiveViewportHeight(this.previewEl, this.scrollContainer),
-      lineAnchors: collectRenderedLineAnchors(this.previewEl, this.canvas, this.canvasWindowTop),
+      lineAnchors: [
+        ...collectRenderedLineAnchors(this.previewEl, this.canvas, this.canvasWindowTop),
+        ...collectVirtualMarkdownLineAnchors(this.view, this.previewEl, this.canvas, this.canvasWindowTop, this.file?.path || "")
+      ],
       codeMirror: this.surfaceType === "source" ? getCodeMirrorView(this.view, this.previewEl) : null
     };
     return this.responsiveLayoutContext;
@@ -4363,7 +4377,15 @@ var PreviewDrawingController = class {
     this.layoutMeasureEl = findLayoutMeasureElement(this.previewEl);
     const measured = measureCanvasExtent(this.previewEl, this.layoutMeasureEl);
     const width = Math.max(1, Math.round(measured.width));
-    const height = Math.max(1, Math.round(measured.height));
+    const measuredHeight = Math.max(1, Math.round(measured.height));
+    const extentFrame = measureResponsiveContentFrame(this.previewEl, this.surfaceType, width, this.canvas);
+    const height = this.drawingsLoaded
+      ? estimateElementLayoutExtent((this.drawingData?.strokes || []).map((stroke) => stroke.layout), {
+        canvasWidth: width,
+        frame: extentFrame,
+        minHeight: measuredHeight
+      })
+      : measuredHeight;
     const visible = measureVisibleSurfaceWindow(this.previewEl, this.scrollContainer, height);
     const isMobile = isMobileRuntime();
     const devicePixelRatio = window.devicePixelRatio || 1;
@@ -4400,6 +4422,10 @@ var PreviewDrawingController = class {
     this.canvasWindowTop = canvasWindow.top;
     this.canvasRenderHeight = canvasWindow.height;
     this.canvasBackingScale = backingStore.scale;
+    applyElementStyles(this.embedLayer, {
+      width: `${width}px`,
+      height: `${height}px`
+    });
     for (const canvas of [this.staticCanvas, this.canvas]) {
       applyElementStyles(canvas, {
         top: `${canvasWindow.top}px`,
@@ -6155,15 +6181,23 @@ var PreviewDrawingController = class {
     const hitPoint = this.pointToCanvas(point);
     const width = this.canvasWidth();
     const height = this.canvasHeight();
+    let boxHit = -1;
     for (let index = this.drawingData.strokes.length - 1; index >= 0; index -= 1) {
       const stroke = this.drawingData.strokes[index];
       const padding = this.selectionHitPaddingPx();
       const threshold = Math.max(padding, (stroke.width || this.penWidth) / 2 + padding);
-      if (strokeHitTest(stroke, hitPoint, width, height, threshold)) {
+      if (!strokeHitTest(stroke, hitPoint, width, height, threshold)) {
+        continue;
+      }
+      if (isTextLikeStroke(stroke) || isEmbedStroke(stroke)) {
+        if (boxHit < 0) {
+          boxHit = index;
+        }
+      } else {
         return index;
       }
     }
-    return -1;
+    return boxHit;
   }
   findStrokesInSelection(startPoint, endPoint) {
     const start = this.pointToCanvas(startPoint);
@@ -7489,6 +7523,38 @@ function annotateVisibleMarkdownElements(app, root, fallbackPath) {
     }
   }
 }
+async function annotateRenderedMarkdownLines(app, root, fallbackPath) {
+  annotateVisibleMarkdownElements(app, root, fallbackPath);
+  const elements = Array.from(root?.querySelectorAll?.(EDITABLE_SELECTOR) || []).filter((element) => {
+    return !element.dataset.noteDrawLineStart && element.dataset.noteDrawSourcePath;
+  });
+  const sources = /* @__PURE__ */ new Map();
+  for (const path of new Set(elements.map((element) => normalizeVaultPath(element.dataset.noteDrawSourcePath || fallbackPath)))) {
+    const file = getVaultFileByPath(app.vault, path);
+    if (!file) {
+      continue;
+    }
+    try {
+      sources.set(path, await app.vault.cachedRead(file));
+    } catch (error) {
+      void error;
+    }
+  }
+  for (const element of elements) {
+    const path = normalizeVaultPath(element.dataset.noteDrawSourcePath || fallbackPath);
+    const source = sources.get(path);
+    if (typeof source !== "string") {
+      continue;
+    }
+    const match = matchRenderedTextToMarkdown(source, element._noteDrawSourceText || element.innerText || element.textContent || "");
+    if (!match) {
+      continue;
+    }
+    element.dataset.noteDrawLineStart = String(match.lineStart);
+    element.dataset.noteDrawLineEnd = String(match.lineEnd);
+    element.dataset.noteDrawLineConfidence = String(match.confidence);
+  }
+}
 function annotateEditableElements(root, ctx, sourcePath = ctx?.sourcePath || "") {
   const elements = [];
   if (root.matches?.(EDITABLE_SELECTOR)) {
@@ -7514,6 +7580,7 @@ function annotateEditableElements(root, ctx, sourcePath = ctx?.sourcePath || "")
     }
     if (Number.isFinite(info.lineStart)) {
       element.dataset.noteDrawLineStart = String(info.lineStart);
+      element.dataset.noteDrawLineConfidence = "1";
     }
     if (Number.isFinite(info.lineEnd)) {
       element.dataset.noteDrawLineEnd = String(info.lineEnd);
@@ -8739,7 +8806,7 @@ function findResponsiveContentElement(previewEl, surfaceType) {
 function measureResponsiveContentFrame(previewEl, surfaceType, surfaceWidth, canvas) {
   const content = findResponsiveContentElement(previewEl, surfaceType);
   const contentRect = content?.getBoundingClientRect?.();
-  const surfaceRect = canvas?.getBoundingClientRect?.() || previewEl?.getBoundingClientRect?.();
+  const surfaceRect = previewEl?.getBoundingClientRect?.() || canvas?.getBoundingClientRect?.();
   if (!contentRect || !surfaceRect || contentRect.width <= 1) {
     return constrainWideContentFrame({
       surfaceWidth,
@@ -8749,7 +8816,7 @@ function measureResponsiveContentFrame(previewEl, surfaceType, surfaceWidth, can
   }
   return constrainWideContentFrame({
     surfaceWidth,
-    contentLeft: contentRect.left - surfaceRect.left,
+    contentLeft: contentRect.left - surfaceRect.left + (Number(previewEl?.scrollLeft) || 0),
     contentWidth: contentRect.width
   }, { isMobile: isMobileRuntime() });
 }
@@ -8817,10 +8884,40 @@ function collectRenderedLineAnchors(root, canvas, canvasWindowTop) {
       top: rect.top - canvasRect.top + canvasWindowTop,
       bottom: rect.bottom - canvasRect.top + canvasWindowTop,
       height: rect.height,
-      area: rect.width * rect.height
+      area: rect.width * rect.height,
+      confidence: clamp(Number(element.dataset.noteDrawLineConfidence ?? 1), 0, 1)
     });
   }
   return anchors;
+}
+function collectVirtualMarkdownLineAnchors(view, root, canvas, canvasWindowTop, fallbackPath) {
+  const renderer = view?.previewMode?.renderer;
+  const sections = Array.isArray(renderer?.sections) ? renderer.sections : [];
+  if (!root || !canvas || !sections.length || renderer?.previewEl !== root) {
+    return [];
+  }
+  const canvasRect = canvas.getBoundingClientRect();
+  const sizer = renderer.sizerEl || root.querySelector?.(":scope > .markdown-preview-sizer") || root.querySelector?.(".markdown-preview-sizer");
+  const sizerRect = sizer?.getBoundingClientRect?.();
+  const baseTop = sizerRect ? sizerRect.top - canvasRect.top + canvasWindowTop : 0;
+  const frame = measureResponsiveContentFrame(root, "preview", Math.max(1, Number(root.scrollWidth) || root.clientWidth || 1), canvas);
+  return buildVirtualMarkdownSectionAnchors(sections.map((section) => {
+    const element = section?.el;
+    const measured = Number(element?.offsetHeight) > 0 && Number.isFinite(Number(element?.offsetTop));
+    return {
+      startLine: section?.start?.line,
+      endLine: section?.end?.line,
+      height: Math.max(Number(section?.height) || 0, Number(element?.offsetHeight) || 0, 1),
+      measuredTop: measured ? Number(element.offsetTop) : null,
+      excluded: Boolean(element?.matches?.(".mod-ui, .mod-header, .mod-footer"))
+    };
+  }), {
+    baseTop,
+    left: frame.left,
+    right: frame.left + frame.width,
+    path: normalizeVaultPath(fallbackPath),
+    confidence: 0.96
+  });
 }
 function captureRenderedLineLocation(anchors, canvasX, canvasY, { maxDistance = 64 } = {}) {
   const horizontal = anchors.filter((anchor) => canvasX >= anchor.left - 28 && canvasX <= anchor.right + 28);
@@ -8839,7 +8936,7 @@ function captureRenderedLineLocation(anchors, canvasX, canvasY, { maxDistance = 
   return {
     path: anchor.path,
     line: anchor.start + ratio * Math.max(1, anchor.end - anchor.start + 1),
-    lineConfidence: inside ? 1 : clamp(1 - distance / Math.max(1, maxDistance), 0, 0.55)
+    lineConfidence: inside ? anchor.confidence : Math.min(anchor.confidence, clamp(1 - distance / Math.max(1, maxDistance), 0, 0.55))
   };
 }
 function projectRenderedLineLocation(anchors, path, line) {
@@ -8850,7 +8947,7 @@ function projectRenderedLineLocation(anchors, path, line) {
   }
   const integerLine = Math.floor(lineNumber);
   const candidates = anchors.filter((anchor) => anchor.path === normalizedPath && integerLine >= anchor.start && integerLine <= anchor.end);
-  const anchor = candidates.sort((a, b) => (a.end - a.start) - (b.end - b.start) || a.area - b.area)[0];
+  const anchor = candidates.sort((a, b) => (b.confidence || 0) - (a.confidence || 0) || (a.end - a.start) - (b.end - b.start) || a.area - b.area)[0];
   if (!anchor) {
     return NaN;
   }
@@ -8912,17 +9009,25 @@ function measureCanvasExtent(previewEl, measureEl = null) {
   const previewRect = previewEl.getBoundingClientRect();
   const measureRect = measureEl?.getBoundingClientRect?.();
   const measureIsPreview = !measureEl || measureEl === previewEl;
+  const scrollLeft = Math.max(0, Number(previewEl.scrollLeft) || 0);
+  const scrollTop = Math.max(0, Number(previewEl.scrollTop) || 0);
+  const relativeRight = measureRect ? measureRect.right - previewRect.left + scrollLeft : 0;
+  const relativeBottom = measureRect ? measureRect.bottom - previewRect.top + scrollTop : 0;
   const width = Math.max(
     measureIsPreview ? previewEl.scrollWidth || 0 : 0,
+    scrollLeft + (previewEl.clientWidth || 0),
     measureEl?.scrollWidth || 0,
     measureEl?.offsetWidth || 0,
+    relativeRight,
     previewRect.width || 0,
     measureRect?.width || 0
   );
   const height = Math.max(
     measureIsPreview ? previewEl.scrollHeight || 0 : 0,
+    scrollTop + (previewEl.clientHeight || 0),
     measureEl?.scrollHeight || 0,
     measureEl?.offsetHeight || 0,
+    relativeBottom,
     measureIsPreview ? previewEl.offsetHeight || 0 : 0,
     previewRect.height || 0,
     measureRect?.height || 0

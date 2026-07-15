@@ -202,6 +202,37 @@ export function createElementLayout({
   });
 }
 
+export function estimateElementLayoutExtent(layouts, {
+  canvasWidth,
+  frame,
+  minHeight = 1,
+  padding = 48,
+  maxHeight = 2_000_000
+} = {}) {
+  const target = normalizeFrame({
+    surfaceWidth: canvasWidth,
+    contentLeft: frame?.left,
+    contentWidth: frame?.width,
+    viewportHeight: minHeight,
+    documentHeight: minHeight
+  });
+  let extent = Math.max(1, finite(minHeight, 1));
+  for (const input of Array.isArray(layouts) ? layouts : []) {
+    const layout = normalizeElementLayout(input);
+    if (!layout) {
+      continue;
+    }
+    const widthScale = clamp(target.contentWidth / layout.sourceFrame.contentWidth, 0.2, 5);
+    const sameContentLane = widthScale >= 0.82 && widthScale <= 1.2;
+    const positionScale = sameContentLane ? 1 : clamp(1 / widthScale, 0.48, 2.2);
+    const conservativeHeightScale = sameContentLane
+      ? widthScale
+      : clamp(Math.max(positionScale, widthScale), 0.42, 2.8);
+    extent = Math.max(extent, layout.box.y * positionScale + layout.box.height * conservativeHeightScale + padding);
+  }
+  return Math.ceil(clamp(extent, Math.max(1, finite(minHeight, 1)), Math.max(1, finite(maxHeight, 2_000_000))));
+}
+
 function projectCorner(corner, target, lineToCanvasY, sourceInput = null, preferDocumentFlow = null) {
   if (!corner) {
     return null;
@@ -424,6 +455,7 @@ export function projectElementLayout(layoutInput, {
   const maxY = Math.max(0, targetFrame.documentHeight - height);
   const clampedX = clamp(x, 0, maxX);
   const clampedY = clamp(y, 0, maxY);
+  const fallbackY = clamp(primary.fallbackY, 0, maxY);
   const anchorStrength = primary.lineAnchored ? 1 : sameContentLane ? 0.94 : 0.68;
   return {
     id: layout.id,
@@ -436,6 +468,7 @@ export function projectElementLayout(layoutInput, {
     yScale,
     anchorX: clampedX,
     anchorY: clampedY,
+    fallbackY,
     anchorStrength,
     sameContentLane,
     primaryAnchoredToLine: primary.lineAnchored
@@ -590,12 +623,71 @@ export function captureElementRelations(items, { nearDistance = 80, maxRelations
   return relations;
 }
 
-export function stabilizeElementRelations(projectedItems, layouts) {
-  const projected = (Array.isArray(projectedItems) ? projectedItems : []).map((item) => ({ ...item }));
+function median(values) {
+  const sorted = values.filter(Number.isFinite).sort((a, b) => a - b);
+  if (!sorted.length) {
+    return NaN;
+  }
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+}
+
+function stabilizeMarkdownRelationAnchors(projected, layoutsById) {
   const byId = new Map(projected.map((item) => [item.id, item]));
+  const neighbors = new Map(projected.map((item) => [item.id, new Set()]));
+  for (const item of projected) {
+    const layout = normalizeElementLayout(layoutsById.get(item.id));
+    for (const relation of layout?.relations || []) {
+      if (!byId.has(relation.targetId)) {
+        continue;
+      }
+      neighbors.get(item.id)?.add(relation.targetId);
+      neighbors.get(relation.targetId)?.add(item.id);
+    }
+  }
+  return projected.map((item) => {
+    if (!item.primaryAnchoredToLine || !Number.isFinite(item.fallbackY)) {
+      return item;
+    }
+    const neighborDeltas = Array.from(neighbors.get(item.id) || []).map((id) => byId.get(id))
+      .filter((neighbor) => neighbor?.primaryAnchoredToLine && Number.isFinite(neighbor.fallbackY))
+      .map((neighbor) => neighbor.y - neighbor.fallbackY);
+    if (neighborDeltas.length < 2) {
+      return item;
+    }
+    const center = median(neighborDeltas);
+    const deviation = median(neighborDeltas.map((value) => Math.abs(value - center)));
+    const tolerance = clamp(deviation * 3 + 32, 96, 240);
+    const inliers = neighborDeltas.filter((value) => Math.abs(value - center) <= tolerance);
+    if (inliers.length < 2) {
+      return item;
+    }
+    const consensus = inliers.reduce((sum, value) => sum + value, 0) / inliers.length;
+    const ownDelta = item.y - item.fallbackY;
+    const correctionThreshold = Math.max(144, item.height * 0.65);
+    if (Math.abs(ownDelta - consensus) <= correctionThreshold) {
+      return item;
+    }
+    const correctedY = item.fallbackY + consensus;
+    return {
+      ...item,
+      y: correctedY,
+      anchorY: correctedY,
+      anchorStrength: Math.min(0.92, finite(item.anchorStrength, 0.92)),
+      relationCorrectedMarkdownAnchor: true
+    };
+  });
+}
+
+export function stabilizeElementRelations(projectedItems, layouts) {
   const layoutsById = layouts instanceof Map
     ? layouts
     : new Map((Array.isArray(layouts) ? layouts : []).map((layout) => [layout?.id, layout]));
+  const projected = stabilizeMarkdownRelationAnchors(
+    (Array.isArray(projectedItems) ? projectedItems : []).map((item) => ({ ...item })),
+    layoutsById
+  );
+  const byId = new Map(projected.map((item) => [item.id, item]));
   const corrections = new Map();
   const visitedPairs = new Set();
   const anchorStrengthFor = (item) => {

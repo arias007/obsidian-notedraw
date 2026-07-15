@@ -205,6 +205,10 @@
   z-index: 19;
 }
 
+.notedraw-shell.is-notedraw-source-shell .notedraw-embed-layer {
+  z-index: 18;
+}
+
 .notedraw-shell.is-two-finger-scroll .notedraw-canvas {
   cursor: grab;
 }

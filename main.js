@@ -471,6 +471,34 @@ function createElementLayout({
     relations
   });
 }
+function estimateElementLayoutExtent(layouts, {
+  canvasWidth,
+  frame,
+  minHeight = 1,
+  padding = 48,
+  maxHeight = 2e6
+} = {}) {
+  const target = normalizeFrame({
+    surfaceWidth: canvasWidth,
+    contentLeft: frame?.left,
+    contentWidth: frame?.width,
+    viewportHeight: minHeight,
+    documentHeight: minHeight
+  });
+  let extent = Math.max(1, finite2(minHeight, 1));
+  for (const input of Array.isArray(layouts) ? layouts : []) {
+    const layout = normalizeElementLayout(input);
+    if (!layout) {
+      continue;
+    }
+    const widthScale = clamp3(target.contentWidth / layout.sourceFrame.contentWidth, 0.2, 5);
+    const sameContentLane = widthScale >= 0.82 && widthScale <= 1.2;
+    const positionScale = sameContentLane ? 1 : clamp3(1 / widthScale, 0.48, 2.2);
+    const conservativeHeightScale = sameContentLane ? widthScale : clamp3(Math.max(positionScale, widthScale), 0.42, 2.8);
+    extent = Math.max(extent, layout.box.y * positionScale + layout.box.height * conservativeHeightScale + padding);
+  }
+  return Math.ceil(clamp3(extent, Math.max(1, finite2(minHeight, 1)), Math.max(1, finite2(maxHeight, 2e6))));
+}
 function projectCorner(corner, target, lineToCanvasY, sourceInput = null, preferDocumentFlow = null) {
   if (!corner) {
     return null;
@@ -667,6 +695,7 @@ function projectElementLayout(layoutInput, {
   const maxY = Math.max(0, targetFrame.documentHeight - height);
   const clampedX = clamp3(x, 0, maxX);
   const clampedY = clamp3(y, 0, maxY);
+  const fallbackY = clamp3(primary.fallbackY, 0, maxY);
   const anchorStrength = primary.lineAnchored ? 1 : sameContentLane ? 0.94 : 0.68;
   return {
     id: layout.id,
@@ -679,6 +708,7 @@ function projectElementLayout(layoutInput, {
     yScale,
     anchorX: clampedX,
     anchorY: clampedY,
+    fallbackY,
     anchorStrength,
     sameContentLane,
     primaryAnchoredToLine: primary.lineAnchored
@@ -824,10 +854,65 @@ function captureElementRelations(items, { nearDistance = 80, maxRelations = 3 } 
   }
   return relations;
 }
-function stabilizeElementRelations(projectedItems, layouts) {
-  const projected = (Array.isArray(projectedItems) ? projectedItems : []).map((item) => ({ ...item }));
+function median(values) {
+  const sorted = values.filter(Number.isFinite).sort((a, b) => a - b);
+  if (!sorted.length) {
+    return NaN;
+  }
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+}
+function stabilizeMarkdownRelationAnchors(projected, layoutsById) {
   const byId = new Map(projected.map((item) => [item.id, item]));
+  const neighbors = new Map(projected.map((item) => [item.id, /* @__PURE__ */ new Set()]));
+  for (const item of projected) {
+    const layout = normalizeElementLayout(layoutsById.get(item.id));
+    for (const relation of layout?.relations || []) {
+      if (!byId.has(relation.targetId)) {
+        continue;
+      }
+      neighbors.get(item.id)?.add(relation.targetId);
+      neighbors.get(relation.targetId)?.add(item.id);
+    }
+  }
+  return projected.map((item) => {
+    if (!item.primaryAnchoredToLine || !Number.isFinite(item.fallbackY)) {
+      return item;
+    }
+    const neighborDeltas = Array.from(neighbors.get(item.id) || []).map((id) => byId.get(id)).filter((neighbor) => neighbor?.primaryAnchoredToLine && Number.isFinite(neighbor.fallbackY)).map((neighbor) => neighbor.y - neighbor.fallbackY);
+    if (neighborDeltas.length < 2) {
+      return item;
+    }
+    const center = median(neighborDeltas);
+    const deviation = median(neighborDeltas.map((value) => Math.abs(value - center)));
+    const tolerance = clamp3(deviation * 3 + 32, 96, 240);
+    const inliers = neighborDeltas.filter((value) => Math.abs(value - center) <= tolerance);
+    if (inliers.length < 2) {
+      return item;
+    }
+    const consensus = inliers.reduce((sum, value) => sum + value, 0) / inliers.length;
+    const ownDelta = item.y - item.fallbackY;
+    const correctionThreshold = Math.max(144, item.height * 0.65);
+    if (Math.abs(ownDelta - consensus) <= correctionThreshold) {
+      return item;
+    }
+    const correctedY = item.fallbackY + consensus;
+    return {
+      ...item,
+      y: correctedY,
+      anchorY: correctedY,
+      anchorStrength: Math.min(0.92, finite2(item.anchorStrength, 0.92)),
+      relationCorrectedMarkdownAnchor: true
+    };
+  });
+}
+function stabilizeElementRelations(projectedItems, layouts) {
   const layoutsById = layouts instanceof Map ? layouts : new Map((Array.isArray(layouts) ? layouts : []).map((layout) => [layout?.id, layout]));
+  const projected = stabilizeMarkdownRelationAnchors(
+    (Array.isArray(projectedItems) ? projectedItems : []).map((item) => ({ ...item })),
+    layoutsById
+  );
+  const byId = new Map(projected.map((item) => [item.id, item]));
   const corrections = /* @__PURE__ */ new Map();
   const visitedPairs = /* @__PURE__ */ new Set();
   const anchorStrengthFor = (item) => {
@@ -935,8 +1020,129 @@ function scaleElementMetrics(metricsInput, scaleInput) {
   };
 }
 
-// src/text-layout.mjs
+// src/markdown-anchors.mjs
+function normalizeRenderedText(value) {
+  return String(value || "").replace(/\u00a0/g, " ").replace(/\r\n/g, "\n").split("\n").map((line) => line.trim()).filter(Boolean).join("\n").trim();
+}
+function normalizeMarkdownText(value) {
+  let text = String(value || "");
+  text = text.replace(/<br\s*\/?>/gi, "\n").replace(/<\/(p|div|li|h[1-6])>/gi, "\n").replace(/<pre[^>]*><code[^>]*>([\s\S]*?)<\/code><\/pre>/gi, "$1").replace(/<\/?(span|u|mark|kbd|sup|sub|small|strong|b|em|i|code)[^>]*>/gi, "").replace(/<[^>]+>/g, "").replace(/^\s*[-*+]\s+\[[ xX]\]\s+/gm, "").replace(/^#{1,6}\s+/gm, "").replace(/^\s{0,3}>\s?/gm, "").replace(/^\s*[-*+]\s+/gm, "").replace(/^\s*\d+[.)]\s+/gm, "").replace(/\*\*([^*]+)\*\*/g, "$1").replace(/\*([^*]+)\*/g, "$1").replace(/__([^_]+)__/g, "$1").replace(/_([^_]+)_/g, "$1").replace(/==([^=]+)==/g, "$1").replace(/`([^`]+)`/g, "$1").replace(/\[\[([^\]|]+)\|([^\]]+)\]\]/g, "$2").replace(/\[\[([^\]]+)\]\]/g, "$1").replace(/\[([^\]]+)\]\([^)]+\)/g, "$1");
+  return normalizeRenderedText(text);
+}
+function collectCandidates(source) {
+  const rawLines = String(source || "").replace(/\r\n/g, "\n").split("\n");
+  const candidates = [];
+  for (let line = 0; line < rawLines.length; line += 1) {
+    const text = normalizeMarkdownText(rawLines[line]);
+    if (text) {
+      candidates.push({ lineStart: line, lineEnd: line, text, kind: "line" });
+    }
+  }
+  let blockStart = -1;
+  let blockLines = [];
+  const flushBlock = (endLine) => {
+    if (blockStart < 0) {
+      return;
+    }
+    const text = normalizeMarkdownText(blockLines.join("\n"));
+    if (text) {
+      candidates.push({ lineStart: blockStart, lineEnd: endLine, text, kind: "block" });
+    }
+    blockStart = -1;
+    blockLines = [];
+  };
+  for (let line = 0; line < rawLines.length; line += 1) {
+    if (!rawLines[line].trim()) {
+      flushBlock(line - 1);
+      continue;
+    }
+    if (blockStart < 0) {
+      blockStart = line;
+    }
+    blockLines.push(rawLines[line]);
+  }
+  flushBlock(rawLines.length - 1);
+  return candidates;
+}
+function matchRenderedTextToMarkdown(source, renderedText) {
+  const rendered = normalizeRenderedText(renderedText);
+  if (!rendered) {
+    return null;
+  }
+  const candidates = collectCandidates(source);
+  const exact = candidates.filter((candidate) => candidate.text === rendered).sort((a, b) => a.lineEnd - a.lineStart - (b.lineEnd - b.lineStart) || (a.kind === "line" ? -1 : 1))[0];
+  if (exact) {
+    return { lineStart: exact.lineStart, lineEnd: exact.lineEnd, confidence: 1 };
+  }
+  const partial = candidates.map((candidate) => {
+    const contains = candidate.text.includes(rendered) || rendered.includes(candidate.text);
+    const overlap = contains ? Math.min(candidate.text.length, rendered.length) / Math.max(candidate.text.length, rendered.length) : 0;
+    return { candidate, overlap };
+  }).filter(({ overlap }) => overlap >= 0.55).sort((a, b) => b.overlap - a.overlap || a.candidate.lineEnd - a.candidate.lineStart - (b.candidate.lineEnd - b.candidate.lineStart))[0];
+  if (!partial) {
+    return null;
+  }
+  return {
+    lineStart: partial.candidate.lineStart,
+    lineEnd: partial.candidate.lineEnd,
+    confidence: Math.min(0.92, Math.max(0.75, partial.overlap))
+  };
+}
+
+// src/markdown-section-anchors.mjs
 function finite3(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+function buildVirtualMarkdownSectionAnchors(sections, {
+  baseTop = 0,
+  left = 0,
+  right = 1,
+  path = "",
+  confidence = 0.96
+} = {}) {
+  const normalized = (Array.isArray(sections) ? sections : []).map((section) => ({
+    start: Number(section?.startLine),
+    end: Number(section?.endLine),
+    height: Math.max(1, finite3(section?.height, 1)),
+    measuredTop: Number.isFinite(Number(section?.measuredTop)) ? Number(section.measuredTop) : null,
+    excluded: Boolean(section?.excluded)
+  }));
+  let precedingHeight = 0;
+  let inferredBase = finite3(baseTop, 0);
+  for (const section of normalized) {
+    if (section.measuredTop !== null) {
+      inferredBase = finite3(baseTop, 0) + section.measuredTop - precedingHeight;
+      break;
+    }
+    precedingHeight += section.height;
+  }
+  const anchors = [];
+  let top = inferredBase;
+  for (const section of normalized) {
+    const sectionTop = section.measuredTop === null ? top : finite3(baseTop, 0) + section.measuredTop;
+    if (!section.excluded && Number.isInteger(section.start) && Number.isInteger(section.end) && section.start >= 0 && section.end >= 0) {
+      anchors.push({
+        path,
+        start: Math.min(section.start, section.end),
+        end: Math.max(section.start, section.end),
+        left,
+        right,
+        top: sectionTop,
+        bottom: sectionTop + section.height,
+        height: section.height,
+        area: Math.max(1, right - left) * section.height,
+        confidence,
+        virtual: true
+      });
+    }
+    top = sectionTop + section.height;
+  }
+  return anchors;
+}
+
+// src/text-layout.mjs
+function finite4(value, fallback = 0) {
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
 }
@@ -957,15 +1163,15 @@ function placeFloatingTextEditor({
   margin = 8,
   anchorVisible = true
 } = {}) {
-  const leftEdge = finite3(viewportOffsetLeft) + Math.max(0, finite3(margin, 8));
-  const topEdge = finite3(viewportOffsetTop) + Math.max(0, finite3(margin, 8));
-  const rightEdge = finite3(viewportOffsetLeft) + Math.max(1, finite3(viewportWidth, 1)) - Math.max(0, finite3(margin, 8));
-  const bottomEdge = finite3(viewportOffsetTop) + Math.max(1, finite3(viewportHeight, 1)) - Math.max(0, finite3(margin, 8));
-  const editorWidth = Math.min(Math.max(1, finite3(width, 1)), Math.max(1, rightEdge - leftEdge));
-  const editorHeight = Math.min(Math.max(1, finite3(height, 1)), Math.max(1, bottomEdge - topEdge));
+  const leftEdge = finite4(viewportOffsetLeft) + Math.max(0, finite4(margin, 8));
+  const topEdge = finite4(viewportOffsetTop) + Math.max(0, finite4(margin, 8));
+  const rightEdge = finite4(viewportOffsetLeft) + Math.max(1, finite4(viewportWidth, 1)) - Math.max(0, finite4(margin, 8));
+  const bottomEdge = finite4(viewportOffsetTop) + Math.max(1, finite4(viewportHeight, 1)) - Math.max(0, finite4(margin, 8));
+  const editorWidth = Math.min(Math.max(1, finite4(width, 1)), Math.max(1, rightEdge - leftEdge));
+  const editorHeight = Math.min(Math.max(1, finite4(height, 1)), Math.max(1, bottomEdge - topEdge));
   const centered = !anchorVisible;
-  const desiredLeft = centered ? leftEdge + (rightEdge - leftEdge - editorWidth) / 2 : finite3(anchorX) - Math.max(0, finite3(contentInsetX));
-  const desiredTop = centered ? topEdge + (bottomEdge - topEdge - editorHeight) / 2 : finite3(anchorY) - Math.max(0, finite3(contentInsetY));
+  const desiredLeft = centered ? leftEdge + (rightEdge - leftEdge - editorWidth) / 2 : finite4(anchorX) - Math.max(0, finite4(contentInsetX));
+  const desiredTop = centered ? topEdge + (bottomEdge - topEdge - editorHeight) / 2 : finite4(anchorY) - Math.max(0, finite4(contentInsetY));
   return {
     left: clamp4(desiredLeft, leftEdge, Math.max(leftEdge, rightEdge - editorWidth)),
     top: clamp4(desiredTop, topEdge, Math.max(topEdge, bottomEdge - editorHeight)),
@@ -992,7 +1198,7 @@ function splitOverlongToken(token, maxWidth, measureText) {
   return chunks;
 }
 function wrapTextLines(text, maxWidth, measureText) {
-  const width = Math.max(1, finite3(maxWidth, 1));
+  const width = Math.max(1, finite4(maxWidth, 1));
   const measure = typeof measureText === "function" ? measureText : (value) => String(value || "").length;
   const output = [];
   for (const paragraph of String(text ?? "").replace(/\r\n?/g, "\n").split("\n")) {
@@ -1033,11 +1239,11 @@ function computeTextLayout({
   padded = false,
   measureText
 } = {}) {
-  const size = clamp4(finite3(fontSize, 18), 10, 72);
-  const measure = typeof measureText === "function" ? (value) => Math.max(0, finite3(measureText(String(value ?? "")), 0)) : (value) => Array.from(String(value ?? "")).length * size * 0.62;
+  const size = clamp4(finite4(fontSize, 18), 10, 72);
+  const measure = typeof measureText === "function" ? (value) => Math.max(0, finite4(measureText(String(value ?? "")), 0)) : (value) => Array.from(String(value ?? "")).length * size * 0.62;
   const paragraphs = String(text ?? "").replace(/\r\n?/g, "\n").split("\n");
   const naturalWidth = Math.max(size, ...paragraphs.map((line) => measure(line)));
-  const availableWidth = Math.max(size, finite3(maxWidth, naturalWidth));
+  const availableWidth = Math.max(size, finite4(maxWidth, naturalWidth));
   const requested = Number(textWidth);
   const hasRequestedWidth = Number.isFinite(requested) && requested > 0;
   const wrapWidth = clamp4(hasRequestedWidth ? requested : naturalWidth, size, availableWidth);
@@ -2358,7 +2564,7 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
       on: (eventName, listener) => this.onApiEvent(eventName, listener)
     };
     return {
-      version: "3.1.49",
+      version: "3.1.50",
       apiVersion: v1.apiVersion,
       capabilities,
       v1,
@@ -3349,7 +3555,7 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
     element.removeClass("notedraw-saving");
   }
   async saveTextBlock(file, originalText, editedText, sourceInfo, target) {
-    const normalizedOriginal = normalizeRenderedText(originalText);
+    const normalizedOriginal = normalizeRenderedText2(originalText);
     if (!normalizedOriginal || normalizeEditableSourceText(originalText) === normalizeEditableSourceText(editedText)) {
       return { changed: true, target };
     }
@@ -3716,6 +3922,7 @@ var PreviewDrawingController = class {
     }
     this.refreshScrollContainer();
     annotateVisibleMarkdownElements(this.plugin.app, this.previewEl, this.file.path);
+    this.scheduleMarkdownAnnotationRefresh();
     if (typeof MutationObserver !== "undefined") {
       this.markdownRenderObserver = new MutationObserver((mutations) => {
         if (mutations.some((mutation) => isMarkdownContentMutation(mutation))) {
@@ -4173,11 +4380,18 @@ var PreviewDrawingController = class {
         return;
       }
       annotateVisibleMarkdownElements(this.plugin.app, this.previewEl, this.file.path);
-      this.responsiveLayoutContext = null;
-      if (this.drawingsLoaded) {
-        this.responsiveLayoutSignature = "";
-        this.scheduleResize();
-      }
+      annotateRenderedMarkdownLines(this.plugin.app, this.previewEl, this.file.path).catch((error) => {
+        void error;
+      }).finally(() => {
+        if (this.destroyed || !this.previewEl?.isConnected) {
+          return;
+        }
+        this.responsiveLayoutContext = null;
+        if (this.drawingsLoaded) {
+          this.responsiveLayoutSignature = "";
+          this.scheduleResize();
+        }
+      });
     }, 120);
   }
   updateFloatingControlsPosition() {
@@ -5103,7 +5317,10 @@ var PreviewDrawingController = class {
     this.responsiveLayoutContext = {
       frame: this.getResponsiveContentFrame(),
       viewportHeight: measureResponsiveViewportHeight(this.previewEl, this.scrollContainer),
-      lineAnchors: collectRenderedLineAnchors(this.previewEl, this.canvas, this.canvasWindowTop),
+      lineAnchors: [
+        ...collectRenderedLineAnchors(this.previewEl, this.canvas, this.canvasWindowTop),
+        ...collectVirtualMarkdownLineAnchors(this.view, this.previewEl, this.canvas, this.canvasWindowTop, this.file?.path || "")
+      ],
       codeMirror: this.surfaceType === "source" ? getCodeMirrorView(this.view, this.previewEl) : null
     };
     return this.responsiveLayoutContext;
@@ -5370,7 +5587,13 @@ var PreviewDrawingController = class {
     this.layoutMeasureEl = findLayoutMeasureElement(this.previewEl);
     const measured = measureCanvasExtent(this.previewEl, this.layoutMeasureEl);
     const width = Math.max(1, Math.round(measured.width));
-    const height = Math.max(1, Math.round(measured.height));
+    const measuredHeight = Math.max(1, Math.round(measured.height));
+    const extentFrame = measureResponsiveContentFrame(this.previewEl, this.surfaceType, width, this.canvas);
+    const height = this.drawingsLoaded ? estimateElementLayoutExtent((this.drawingData?.strokes || []).map((stroke) => stroke.layout), {
+      canvasWidth: width,
+      frame: extentFrame,
+      minHeight: measuredHeight
+    }) : measuredHeight;
     const visible = measureVisibleSurfaceWindow(this.previewEl, this.scrollContainer, height);
     const isMobile = isMobileRuntime();
     const devicePixelRatio = window.devicePixelRatio || 1;
@@ -5406,6 +5629,10 @@ var PreviewDrawingController = class {
     this.canvasWindowTop = canvasWindow.top;
     this.canvasRenderHeight = canvasWindow.height;
     this.canvasBackingScale = backingStore.scale;
+    applyElementStyles(this.embedLayer, {
+      width: `${width}px`,
+      height: `${height}px`
+    });
     for (const canvas of [this.staticCanvas, this.canvas]) {
       applyElementStyles(canvas, {
         top: `${canvasWindow.top}px`,
@@ -7152,15 +7379,23 @@ var PreviewDrawingController = class {
     const hitPoint = this.pointToCanvas(point);
     const width = this.canvasWidth();
     const height = this.canvasHeight();
+    let boxHit = -1;
     for (let index = this.drawingData.strokes.length - 1; index >= 0; index -= 1) {
       const stroke = this.drawingData.strokes[index];
       const padding = this.selectionHitPaddingPx();
       const threshold = Math.max(padding, (stroke.width || this.penWidth) / 2 + padding);
-      if (strokeHitTest(stroke, hitPoint, width, height, threshold)) {
+      if (!strokeHitTest(stroke, hitPoint, width, height, threshold)) {
+        continue;
+      }
+      if (isTextLikeStroke(stroke) || isEmbedStroke(stroke)) {
+        if (boxHit < 0) {
+          boxHit = index;
+        }
+      } else {
         return index;
       }
     }
-    return -1;
+    return boxHit;
   }
   findStrokesInSelection(startPoint, endPoint) {
     const start = this.pointToCanvas(startPoint);
@@ -7522,8 +7757,8 @@ var PreviewDrawingController = class {
     this.currentEditorFile = null;
   }
   commitWebviewTextEdit(element, originalText, editedText) {
-    const normalizedOriginal = normalizeRenderedText(originalText);
-    const normalizedEdited = normalizeRenderedText(editedText);
+    const normalizedOriginal = normalizeRenderedText2(originalText);
+    const normalizedEdited = normalizeRenderedText2(editedText);
     if (!normalizedOriginal || normalizedOriginal === normalizedEdited) {
       return;
     }
@@ -7538,7 +7773,7 @@ var PreviewDrawingController = class {
       return;
     }
     const edits = Array.isArray(this.drawingData.webEdits) ? this.drawingData.webEdits : [];
-    const existingIndex = edits.findIndex((item) => item?.kind === "text" && item.path === edit.path && normalizeRenderedText(item.originalText) === normalizedOriginal);
+    const existingIndex = edits.findIndex((item) => item?.kind === "text" && item.path === edit.path && normalizeRenderedText2(item.originalText) === normalizedOriginal);
     if (existingIndex >= 0) {
       edits[existingIndex] = edit;
     } else {
@@ -7556,8 +7791,8 @@ var PreviewDrawingController = class {
       if (edit?.kind !== "text" || !edit.path || typeof edit.editedText !== "string") {
         continue;
       }
-      const original = normalizeRenderedText(edit.originalText);
-      const edited = normalizeRenderedText(edit.editedText);
+      const original = normalizeRenderedText2(edit.originalText);
+      const edited = normalizeRenderedText2(edit.editedText);
       if (!original || !edited) {
         continue;
       }
@@ -7565,7 +7800,7 @@ var PreviewDrawingController = class {
       if (!element) {
         continue;
       }
-      const current = normalizeRenderedText(element.innerText);
+      const current = normalizeRenderedText2(element.innerText);
       if (current !== original && current !== edited) {
         continue;
       }
@@ -7976,7 +8211,7 @@ function findEditableTarget(target, previewEl) {
   if (!editable || !previewEl.contains(editable)) {
     return null;
   }
-  if (!normalizeRenderedText(editable.innerText)) {
+  if (!normalizeRenderedText2(editable.innerText)) {
     return null;
   }
   return editable;
@@ -7987,7 +8222,7 @@ function findWebviewEditableTarget(target, previewEl) {
   }
   let current = target.closest(WEBVIEW_EDITABLE_SELECTOR);
   while (current && current !== previewEl) {
-    if (!current.closest(WEBVIEW_BLOCKED_EDIT_SELECTOR) && normalizeRenderedText(current.innerText)) {
+    if (!current.closest(WEBVIEW_BLOCKED_EDIT_SELECTOR) && normalizeRenderedText2(current.innerText)) {
       return current;
     }
     current = current.parentElement?.closest?.(WEBVIEW_EDITABLE_SELECTOR);
@@ -8135,7 +8370,7 @@ function isSourceTextTarget(target, previewEl) {
     target.closest?.(".cm-line, .cm-content, .cm-activeLine") || target.classList?.contains("cm-line") || target.classList?.contains("cm-content")
   );
 }
-function normalizeRenderedText(value) {
+function normalizeRenderedText2(value) {
   return String(value || "").replace(/\u00a0/g, " ").replace(/\r\n/g, "\n").split("\n").map((line) => line.trim()).filter(Boolean).join("\n").trim();
 }
 function normalizeEditableSourceText(value) {
@@ -8394,7 +8629,7 @@ function normalizeMarkdownBlock(value) {
   let text = String(value || "").trim();
   text = text.replace(/<br\s*\/?>/gi, "\n").replace(/<\/(p|div|li|h[1-6])>/gi, "\n").replace(/<pre[^>]*><code[^>]*>([\s\S]*?)<\/code><\/pre>/gi, "$1").replace(/<\/?(span|u|mark|kbd|sup|sub|small|strong|b|em|i|code)[^>]*>/gi, "").replace(/<[^>]+>/g, "");
   text = text.replace(/^\s*[-*+]\s+\[[ xX]\]\s+/gm, "").replace(/^#{1,6}\s+/gm, "").replace(/^\s{0,3}>\s?/gm, "").replace(/^\s*[-*+]\s+/gm, "").replace(/^\s*\d+[.)]\s+/gm, "").replace(/\*\*([^*]+)\*\*/g, "$1").replace(/\*([^*]+)\*/g, "$1").replace(/__([^_]+)__/g, "$1").replace(/_([^_]+)_/g, "$1").replace(/==([^=]+)==/g, "$1").replace(/`([^`]+)`/g, "$1").replace(/\[\[([^\]|]+)\|([^\]]+)\]\]/g, "$2").replace(/\[\[([^\]]+)\]\]/g, "$1").replace(/\[([^\]]+)\]\([^)]+\)/g, "$1");
-  return normalizeRenderedText(text);
+  return normalizeRenderedText2(text);
 }
 function collectMarkdownBlocks(source) {
   const blocks = [];
@@ -8491,6 +8726,38 @@ function annotateVisibleMarkdownElements(app, root, fallbackPath) {
     }
   }
 }
+async function annotateRenderedMarkdownLines(app, root, fallbackPath) {
+  annotateVisibleMarkdownElements(app, root, fallbackPath);
+  const elements = Array.from(root?.querySelectorAll?.(EDITABLE_SELECTOR) || []).filter((element) => {
+    return !element.dataset.noteDrawLineStart && element.dataset.noteDrawSourcePath;
+  });
+  const sources = /* @__PURE__ */ new Map();
+  for (const path of new Set(elements.map((element) => normalizeVaultPath(element.dataset.noteDrawSourcePath || fallbackPath)))) {
+    const file = getVaultFileByPath(app.vault, path);
+    if (!file) {
+      continue;
+    }
+    try {
+      sources.set(path, await app.vault.cachedRead(file));
+    } catch (error) {
+      void error;
+    }
+  }
+  for (const element of elements) {
+    const path = normalizeVaultPath(element.dataset.noteDrawSourcePath || fallbackPath);
+    const source = sources.get(path);
+    if (typeof source !== "string") {
+      continue;
+    }
+    const match = matchRenderedTextToMarkdown(source, element._noteDrawSourceText || element.innerText || element.textContent || "");
+    if (!match) {
+      continue;
+    }
+    element.dataset.noteDrawLineStart = String(match.lineStart);
+    element.dataset.noteDrawLineEnd = String(match.lineEnd);
+    element.dataset.noteDrawLineConfidence = String(match.confidence);
+  }
+}
 function annotateEditableElements(root, ctx, sourcePath = ctx?.sourcePath || "") {
   const elements = [];
   if (root.matches?.(EDITABLE_SELECTOR)) {
@@ -8516,6 +8783,7 @@ function annotateEditableElements(root, ctx, sourcePath = ctx?.sourcePath || "")
     }
     if (Number.isFinite(info.lineStart)) {
       element.dataset.noteDrawLineStart = String(info.lineStart);
+      element.dataset.noteDrawLineConfidence = "1";
     }
     if (Number.isFinite(info.lineEnd)) {
       element.dataset.noteDrawLineEnd = String(info.lineEnd);
@@ -8898,12 +9166,12 @@ function findWebEditElement(root, edit, used = /* @__PURE__ */ new Set()) {
   if (direct && !used.has(direct)) {
     return direct;
   }
-  const original = normalizeRenderedText(edit.originalText);
+  const original = normalizeRenderedText2(edit.originalText);
   if (!original) {
     return null;
   }
   const candidates = Array.from(root.querySelectorAll(WEBVIEW_EDITABLE_SELECTOR)).filter((element) => !used.has(element) && !element.closest(WEBVIEW_BLOCKED_EDIT_SELECTOR));
-  return candidates.find((element) => normalizeRenderedText(element.innerText) === original) || null;
+  return candidates.find((element) => normalizeRenderedText2(element.innerText) === original) || null;
 }
 function isEmbeddedPreview(preview) {
   return Boolean(preview.closest(".markdown-embed, .markdown-embed-content, .internal-embed, .external-embed"));
@@ -9170,7 +9438,7 @@ function normalizeWebEdits(value) {
     originalText: typeof edit?.originalText === "string" ? edit.originalText : "",
     editedText: typeof edit?.editedText === "string" ? edit.editedText : "",
     updatedAt: typeof edit?.updatedAt === "string" ? edit.updatedAt : null
-  })).filter((edit) => edit.kind === "text" && edit.path && normalizeRenderedText(edit.editedText));
+  })).filter((edit) => edit.kind === "text" && edit.path && normalizeRenderedText2(edit.editedText));
 }
 function normalizeStroke(stroke) {
   const points = Array.isArray(stroke?.points) ? stroke.points : [];
@@ -9329,7 +9597,7 @@ function getSourceInfo(element) {
   };
 }
 function resolveSourceEditTarget(source, sourceInfo, originalText) {
-  const normalizedOriginal = normalizeRenderedText(originalText);
+  const normalizedOriginal = normalizeRenderedText2(originalText);
   if (!normalizedOriginal) {
     return null;
   }
@@ -9356,7 +9624,7 @@ function resolveLockedTarget(source, target, baselineText) {
   if (!target) {
     return null;
   }
-  const normalizedBaseline = normalizeRenderedText(baselineText);
+  const normalizedBaseline = normalizeRenderedText2(baselineText);
   const start = Number(target.start);
   const end = Number(target.end);
   if (isValidSourceRange(source, start, end)) {
@@ -9391,7 +9659,7 @@ function createTextEditTarget(match, sourceInfo, renderedText) {
     line: Number.isFinite(match.line) ? match.line : null,
     endLine: Number.isFinite(match.endLine) ? match.endLine : match.line ?? null,
     text,
-    normalizedText: normalizeRenderedText(renderedText),
+    normalizedText: normalizeRenderedText2(renderedText),
     normalizedMarkdown: normalizeMarkdownBlock(text),
     sourceInfo: {
       lineStart: sourceInfo?.lineStart ?? null,
@@ -9739,7 +10007,7 @@ function findResponsiveContentElement(previewEl, surfaceType) {
 function measureResponsiveContentFrame(previewEl, surfaceType, surfaceWidth, canvas) {
   const content = findResponsiveContentElement(previewEl, surfaceType);
   const contentRect = content?.getBoundingClientRect?.();
-  const surfaceRect = canvas?.getBoundingClientRect?.() || previewEl?.getBoundingClientRect?.();
+  const surfaceRect = previewEl?.getBoundingClientRect?.() || canvas?.getBoundingClientRect?.();
   if (!contentRect || !surfaceRect || contentRect.width <= 1) {
     return constrainWideContentFrame({
       surfaceWidth,
@@ -9749,7 +10017,7 @@ function measureResponsiveContentFrame(previewEl, surfaceType, surfaceWidth, can
   }
   return constrainWideContentFrame({
     surfaceWidth,
-    contentLeft: contentRect.left - surfaceRect.left,
+    contentLeft: contentRect.left - surfaceRect.left + (Number(previewEl?.scrollLeft) || 0),
     contentWidth: contentRect.width
   }, { isMobile: isMobileRuntime() });
 }
@@ -9817,10 +10085,40 @@ function collectRenderedLineAnchors(root, canvas, canvasWindowTop) {
       top: rect.top - canvasRect.top + canvasWindowTop,
       bottom: rect.bottom - canvasRect.top + canvasWindowTop,
       height: rect.height,
-      area: rect.width * rect.height
+      area: rect.width * rect.height,
+      confidence: clamp5(Number(element.dataset.noteDrawLineConfidence ?? 1), 0, 1)
     });
   }
   return anchors;
+}
+function collectVirtualMarkdownLineAnchors(view, root, canvas, canvasWindowTop, fallbackPath) {
+  const renderer = view?.previewMode?.renderer;
+  const sections = Array.isArray(renderer?.sections) ? renderer.sections : [];
+  if (!root || !canvas || !sections.length || renderer?.previewEl !== root) {
+    return [];
+  }
+  const canvasRect = canvas.getBoundingClientRect();
+  const sizer = renderer.sizerEl || root.querySelector?.(":scope > .markdown-preview-sizer") || root.querySelector?.(".markdown-preview-sizer");
+  const sizerRect = sizer?.getBoundingClientRect?.();
+  const baseTop = sizerRect ? sizerRect.top - canvasRect.top + canvasWindowTop : 0;
+  const frame = measureResponsiveContentFrame(root, "preview", Math.max(1, Number(root.scrollWidth) || root.clientWidth || 1), canvas);
+  return buildVirtualMarkdownSectionAnchors(sections.map((section) => {
+    const element = section?.el;
+    const measured = Number(element?.offsetHeight) > 0 && Number.isFinite(Number(element?.offsetTop));
+    return {
+      startLine: section?.start?.line,
+      endLine: section?.end?.line,
+      height: Math.max(Number(section?.height) || 0, Number(element?.offsetHeight) || 0, 1),
+      measuredTop: measured ? Number(element.offsetTop) : null,
+      excluded: Boolean(element?.matches?.(".mod-ui, .mod-header, .mod-footer"))
+    };
+  }), {
+    baseTop,
+    left: frame.left,
+    right: frame.left + frame.width,
+    path: normalizeVaultPath(fallbackPath),
+    confidence: 0.96
+  });
 }
 function captureRenderedLineLocation(anchors, canvasX, canvasY, { maxDistance = 64 } = {}) {
   const horizontal = anchors.filter((anchor2) => canvasX >= anchor2.left - 28 && canvasX <= anchor2.right + 28);
@@ -9839,7 +10137,7 @@ function captureRenderedLineLocation(anchors, canvasX, canvasY, { maxDistance = 
   return {
     path: anchor.path,
     line: anchor.start + ratio * Math.max(1, anchor.end - anchor.start + 1),
-    lineConfidence: inside ? 1 : clamp5(1 - distance / Math.max(1, maxDistance), 0, 0.55)
+    lineConfidence: inside ? anchor.confidence : Math.min(anchor.confidence, clamp5(1 - distance / Math.max(1, maxDistance), 0, 0.55))
   };
 }
 function projectRenderedLineLocation(anchors, path, line) {
@@ -9850,7 +10148,7 @@ function projectRenderedLineLocation(anchors, path, line) {
   }
   const integerLine = Math.floor(lineNumber);
   const candidates = anchors.filter((anchor2) => anchor2.path === normalizedPath && integerLine >= anchor2.start && integerLine <= anchor2.end);
-  const anchor = candidates.sort((a, b) => a.end - a.start - (b.end - b.start) || a.area - b.area)[0];
+  const anchor = candidates.sort((a, b) => (b.confidence || 0) - (a.confidence || 0) || a.end - a.start - (b.end - b.start) || a.area - b.area)[0];
   if (!anchor) {
     return NaN;
   }
@@ -9912,17 +10210,25 @@ function measureCanvasExtent(previewEl, measureEl = null) {
   const previewRect = previewEl.getBoundingClientRect();
   const measureRect = measureEl?.getBoundingClientRect?.();
   const measureIsPreview = !measureEl || measureEl === previewEl;
+  const scrollLeft = Math.max(0, Number(previewEl.scrollLeft) || 0);
+  const scrollTop = Math.max(0, Number(previewEl.scrollTop) || 0);
+  const relativeRight = measureRect ? measureRect.right - previewRect.left + scrollLeft : 0;
+  const relativeBottom = measureRect ? measureRect.bottom - previewRect.top + scrollTop : 0;
   const width = Math.max(
     measureIsPreview ? previewEl.scrollWidth || 0 : 0,
+    scrollLeft + (previewEl.clientWidth || 0),
     measureEl?.scrollWidth || 0,
     measureEl?.offsetWidth || 0,
+    relativeRight,
     previewRect.width || 0,
     measureRect?.width || 0
   );
   const height = Math.max(
     measureIsPreview ? previewEl.scrollHeight || 0 : 0,
+    scrollTop + (previewEl.clientHeight || 0),
     measureEl?.scrollHeight || 0,
     measureEl?.offsetHeight || 0,
+    relativeBottom,
     measureIsPreview ? previewEl.offsetHeight || 0 : 0,
     previewRect.height || 0,
     measureRect?.height || 0

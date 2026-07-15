@@ -5,6 +5,7 @@ import {
   captureElementRelations,
   createElementLayout,
   elementLayoutNeedsRepair,
+  estimateElementLayoutExtent,
   normalizeElementLayout,
   projectElementLayout,
   projectElementPoints,
@@ -497,6 +498,51 @@ test("intersection anchors reduce cross-point drift without swapping element ord
   assert.ok(Math.abs(after[1].x - before[1].x) < 30);
 });
 
+test("two intersecting Markdown neighbors repair one catastrophic line-anchor outlier", () => {
+  const first = makeLayout("consensus-a", 100, 100, 120, 100);
+  const second = makeLayout("consensus-b", 110, 120, 120, 100);
+  const outlier = makeLayout("consensus-outlier", 120, 140, 120, 100);
+  first.relations = [{ targetId: outlier.id, kind: "intersection", sourceU: 0.5, sourceV: 0.5, targetU: 0.5, targetV: 0.5, dx: 0, dy: 0, weight: 0.32 }];
+  second.relations = [{ targetId: outlier.id, kind: "intersection", sourceU: 0.5, sourceV: 0.5, targetU: 0.5, targetV: 0.5, dx: 0, dy: 0, weight: 0.32 }];
+  const before = [
+    { id: first.id, x: 100, y: 1200, fallbackY: 200, width: 120, height: 100, scale: 1, xScale: 1, yScale: 1, anchorX: 100, anchorY: 1200, anchorStrength: 1, primaryAnchoredToLine: true },
+    { id: second.id, x: 110, y: 1280, fallbackY: 300, width: 120, height: 100, scale: 1, xScale: 1, yScale: 1, anchorX: 110, anchorY: 1280, anchorStrength: 1, primaryAnchoredToLine: true },
+    { id: outlier.id, x: 120, y: 100, fallbackY: 900, width: 120, height: 100, scale: 1, xScale: 1, yScale: 1, anchorX: 120, anchorY: 100, anchorStrength: 1, primaryAnchoredToLine: true }
+  ];
+  const after = stabilizeElementRelations(before, new Map([
+    [first.id, first],
+    [second.id, second],
+    [outlier.id, outlier]
+  ]));
+  const repaired = after.find((item) => item.id === outlier.id);
+
+  assert.equal(repaired.relationCorrectedMarkdownAnchor, true);
+  assert.ok(repaired.y > 1800, "the outlier follows the shared Markdown reflow of its intersecting neighbors");
+  assert.ok(Math.abs((repaired.y - repaired.fallbackY) - 990) < 100);
+});
+
+test("a standalone Markdown line anchor is never overridden by relation consensus", () => {
+  const layout = makeLayout("standalone-anchor", 100, 100, 120, 100);
+  const [after] = stabilizeElementRelations([{
+    id: layout.id,
+    x: 100,
+    y: 1400,
+    fallbackY: 200,
+    width: 120,
+    height: 100,
+    scale: 1,
+    xScale: 1,
+    yScale: 1,
+    anchorX: 100,
+    anchorY: 1400,
+    anchorStrength: 1,
+    primaryAnchoredToLine: true
+  }], new Map([[layout.id, layout]]));
+
+  assert.equal(after.y, 1400);
+  assert.equal(after.relationCorrectedMarkdownAnchor, undefined);
+});
+
 test("unstable transition frames are repaired instead of trusted as source layouts", () => {
   const layout = createElementLayout({
     id: "unstable-frame",
@@ -547,4 +593,55 @@ test("a capped Markdown lane remains stable on an ultra-wide desktop surface", (
   });
 
   assert.equal(elementLayoutNeedsRepair(layout), false);
+});
+
+test("saved bottom elements extend a short editing surface without collapsing", () => {
+  const bottom = createElementLayout({
+    id: "bottom-element",
+    bounds: { minX: 80, minY: 2130, maxX: 280, maxY: 2385 },
+    canvasWidth: 516,
+    canvasHeight: 2690,
+    viewportHeight: 720,
+    frame: { left: 32, width: 441 },
+    sourcePath: "Notes/example.md"
+  });
+  const extent = estimateElementLayoutExtent([bottom], {
+    canvasWidth: 516,
+    frame: { left: 32, width: 441 },
+    minHeight: 645
+  });
+  const projected = projectElementLayout(bottom, {
+    canvasWidth: 516,
+    canvasHeight: extent,
+    viewportHeight: 337,
+    frame: { left: 32, width: 441 },
+    preferDocumentFlow: false
+  });
+
+  assert.ok(extent >= 2433, "the canvas includes the saved bottom edge plus interaction padding");
+  assert.equal(projected.y, 2130);
+  assert.equal(projected.height, 255);
+  assert.ok(projected.y + projected.height < extent);
+});
+
+test("layout extent follows content width reflow rather than viewport height", () => {
+  const layout = makeLayout("reflowed-bottom", 100, 1500, 200, 220);
+  const narrow = estimateElementLayoutExtent([layout], {
+    canvasWidth: 360,
+    frame: { left: 20, width: 320 },
+    minHeight: 600
+  });
+  const narrowWithKeyboard = estimateElementLayoutExtent([layout], {
+    canvasWidth: 360,
+    frame: { left: 20, width: 320 },
+    minHeight: 900
+  });
+  const wide = estimateElementLayoutExtent([layout], {
+    canvasWidth: 720,
+    frame: { left: 60, width: 600 },
+    minHeight: 600
+  });
+
+  assert.equal(narrowWithKeyboard, Math.max(narrow, 900));
+  assert.ok(narrow > wide, "a narrow Markdown lane keeps the longer vertical flow");
 });
