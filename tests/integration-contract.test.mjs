@@ -27,15 +27,15 @@ test("the stable v1 API exposes Cancip-friendly capabilities and events", async 
   assert.match(source, /on: \(eventName, listener\) => this\.onApiEvent\(eventName, listener\)/);
 });
 
-test("3.1.50 preserves bottom coordinates and cross-view frames without eager hidden-view refresh", async () => {
+test("3.1.51 preserves bottom coordinates and cross-view frames without eager hidden-view refresh", async () => {
   const [source, manifestText] = await Promise.all([
     readFile(sourceUrl, "utf8"),
     readFile(manifestUrl, "utf8")
   ]);
   const manifest = JSON.parse(manifestText);
 
-  assert.equal(manifest.version, "3.1.50");
-  assert.match(source, /version: "3\.1\.50"/);
+  assert.equal(manifest.version, "3.1.51");
+  assert.match(source, /version: "3\.1\.51"/);
   assert.match(source, /if \(!this\.responsivePointsInitialized \|\| signature !== this\.responsiveLayoutSignature\)/);
   assert.match(source, /migratedDrawingData\.version = Math\.max\(3/);
   assert.match(source, /captureElementLayoutForStroke/);
@@ -156,4 +156,14 @@ test("runtime layout uses a capped desktop Markdown lane and mobile-aware vertic
   assert.match(source, /matchRenderedTextToMarkdown/);
   assert.match(source, /let boxHit = -1[\s\S]*isTextLikeStroke\(stroke\) \|\| isEmbedStroke\(stroke\)[\s\S]*return index;[\s\S]*return boxHit/);
   assert.match(styles, /is-notedraw-source-shell \.notedraw-embed-layer \{\s*z-index: 18;/);
+});
+
+test("draw mode defers blank-selection clearing until tap or stroke movement is known", async () => {
+  const source = await readFile(sourceUrl, "utf8");
+
+  assert.match(source, /const selectedDrawGesture = resolveSelectedDrawGesture\(/);
+  assert.match(source, /selectedDrawGesture === SELECTED_DRAW_GESTURE_MANIPULATE[\s\S]*this\.startSelectedStrokeDrag\(event, point, hitStrokeIndex\)/);
+  assert.match(source, /selectedDrawGesture !== SELECTED_DRAW_GESTURE_DRAW_OR_DESELECT[\s\S]*this\.clearSelectedStrokes\(\)/);
+  assert.match(source, /if \(this\.didMove && !wasDrawing\) \{\s*this\.endTextEdit\(\);\s*this\.clearSelectedStrokes\(\)/);
+  assert.match(source, /if \(!this\.didMove \|\| movedDistance <= this\.tapDistancePx\(\)[\s\S]*this\.setSelectedStrokes\(this\.findStrokeAt\(point\)\)/);
 });

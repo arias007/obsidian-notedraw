@@ -1141,6 +1141,24 @@ function buildVirtualMarkdownSectionAnchors(sections, {
   return anchors;
 }
 
+// src/selection-draw-gesture.mjs
+var SELECTED_DRAW_GESTURE_DRAW_OR_DESELECT = "draw-or-deselect";
+var SELECTED_DRAW_GESTURE_MANIPULATE = "manipulate";
+function resolveSelectedDrawGesture({
+  toolMode,
+  hasSelection,
+  hitStrokeIndex = -1,
+  insideSelectionFrame = false
+} = {}) {
+  if (toolMode !== "draw" || !hasSelection) {
+    return null;
+  }
+  if (hitStrokeIndex >= 0 || insideSelectionFrame) {
+    return SELECTED_DRAW_GESTURE_MANIPULATE;
+  }
+  return SELECTED_DRAW_GESTURE_DRAW_OR_DESELECT;
+}
+
 // src/text-layout.mjs
 function finite4(value, fallback = 0) {
   const number = Number(value);
@@ -2564,7 +2582,7 @@ var NoteDrawPlugin = class extends import_obsidian.Plugin {
       on: (eventName, listener) => this.onApiEvent(eventName, listener)
     };
     return {
-      version: "3.1.50",
+      version: "3.1.51",
       apiVersion: v1.apiVersion,
       capabilities,
       v1,
@@ -5709,6 +5727,13 @@ var PreviewDrawingController = class {
     const point = this.eventToPoint(event);
     const hitStrokeIndex = this.findStrokeAt(point);
     const resizeHandle = this.findSelectionHandleAt(point);
+    const hadSelection = this.getSelectedStrokeIndexes().length > 0;
+    const selectedDrawGesture = resolveSelectedDrawGesture({
+      toolMode: this.toolMode,
+      hasSelection: hadSelection,
+      hitStrokeIndex,
+      insideSelectionFrame: this.selectedStrokeFrameContains(point)
+    });
     if (resizeHandle) {
       this.startSelectedStrokeResize(event, point, resizeHandle);
       return;
@@ -5751,13 +5776,20 @@ var PreviewDrawingController = class {
       this.startSelectedStrokeDrag(event, point, hitStrokeIndex);
       return;
     }
+    if (selectedDrawGesture === SELECTED_DRAW_GESTURE_MANIPULATE && hitStrokeIndex >= 0 && !this.isStrokeSelected(hitStrokeIndex)) {
+      this.setSelectedStrokes(hitStrokeIndex);
+      this.startSelectedStrokeDrag(event, point, hitStrokeIndex);
+      return;
+    }
     if (this.getSelectedStrokeIndexes().length && !this.selectedStrokeFrameContains(point) && hitStrokeIndex < 0) {
-      this.clearSelectedStrokes();
-      if (!editable && this.toolMode !== TOOL_SELECT && this.toolMode !== TOOL_TEXT) {
-        this.render();
-        event.preventDefault();
-        event.stopPropagation();
-        return;
+      if (selectedDrawGesture !== SELECTED_DRAW_GESTURE_DRAW_OR_DESELECT) {
+        this.clearSelectedStrokes();
+        if (!editable && this.toolMode !== TOOL_SELECT && this.toolMode !== TOOL_TEXT) {
+          this.render();
+          event.preventDefault();
+          event.stopPropagation();
+          return;
+        }
       }
     }
     if (hitStrokeIndex >= 0 && isTextLikeStroke(this.drawingData.strokes[hitStrokeIndex]) && event.detail >= 2) {

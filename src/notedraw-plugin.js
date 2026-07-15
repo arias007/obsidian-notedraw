@@ -40,6 +40,11 @@ import {
 import { matchRenderedTextToMarkdown } from "./markdown-anchors.mjs";
 import { buildVirtualMarkdownSectionAnchors } from "./markdown-section-anchors.mjs";
 import {
+  SELECTED_DRAW_GESTURE_DRAW_OR_DESELECT,
+  SELECTED_DRAW_GESTURE_MANIPULATE,
+  resolveSelectedDrawGesture
+} from "./selection-draw-gesture.mjs";
+import {
   computeTextLayout,
   placeFloatingTextEditor
 } from "./text-layout.mjs";
@@ -1339,7 +1344,7 @@ var NoteDrawPlugin = class extends Plugin {
       on: (eventName, listener) => this.onApiEvent(eventName, listener)
     };
     return {
-      version: "3.1.50",
+      version: "3.1.51",
       apiVersion: v1.apiVersion,
       capabilities,
       v1,
@@ -4502,6 +4507,13 @@ var PreviewDrawingController = class {
     const point = this.eventToPoint(event);
     const hitStrokeIndex = this.findStrokeAt(point);
     const resizeHandle = this.findSelectionHandleAt(point);
+    const hadSelection = this.getSelectedStrokeIndexes().length > 0;
+    const selectedDrawGesture = resolveSelectedDrawGesture({
+      toolMode: this.toolMode,
+      hasSelection: hadSelection,
+      hitStrokeIndex,
+      insideSelectionFrame: this.selectedStrokeFrameContains(point)
+    });
     if (resizeHandle) {
       this.startSelectedStrokeResize(event, point, resizeHandle);
       return;
@@ -4544,13 +4556,20 @@ var PreviewDrawingController = class {
       this.startSelectedStrokeDrag(event, point, hitStrokeIndex);
       return;
     }
+    if (selectedDrawGesture === SELECTED_DRAW_GESTURE_MANIPULATE && hitStrokeIndex >= 0 && !this.isStrokeSelected(hitStrokeIndex)) {
+      this.setSelectedStrokes(hitStrokeIndex);
+      this.startSelectedStrokeDrag(event, point, hitStrokeIndex);
+      return;
+    }
     if (this.getSelectedStrokeIndexes().length && !this.selectedStrokeFrameContains(point) && hitStrokeIndex < 0) {
-      this.clearSelectedStrokes();
-      if (!editable && this.toolMode !== TOOL_SELECT && this.toolMode !== TOOL_TEXT) {
-        this.render();
-        event.preventDefault();
-        event.stopPropagation();
-        return;
+      if (selectedDrawGesture !== SELECTED_DRAW_GESTURE_DRAW_OR_DESELECT) {
+        this.clearSelectedStrokes();
+        if (!editable && this.toolMode !== TOOL_SELECT && this.toolMode !== TOOL_TEXT) {
+          this.render();
+          event.preventDefault();
+          event.stopPropagation();
+          return;
+        }
       }
     }
     if (hitStrokeIndex >= 0 && isTextLikeStroke(this.drawingData.strokes[hitStrokeIndex]) && event.detail >= 2) {
